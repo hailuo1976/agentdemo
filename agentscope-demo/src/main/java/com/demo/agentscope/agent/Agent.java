@@ -101,7 +101,7 @@ public class Agent {
         this.context = new ArrayList<>();
         this.agentState = new HashMap<>();
         this.providerName = providerName;
-        this.maxIterations = 10;
+        this.maxIterations = 50;
 
         log.info("智能体已创建: id={}, name={}", id, name);
     }

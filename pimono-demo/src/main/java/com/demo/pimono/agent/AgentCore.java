@@ -13,7 +13,7 @@ import java.util.*;
 public class AgentCore {
 
     private static final Logger log = LoggerFactory.getLogger(AgentCore.class);
-    private static final int MAX_TOOL_ROUNDS = 10;
+    private static final int MAX_TOOL_ROUNDS = 50;
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     private final LlmClient llmClient;
