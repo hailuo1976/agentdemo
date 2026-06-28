@@ -114,10 +114,10 @@ class AgentTest {
     }
 
     @Test
-    @DisplayName("Agent getMaxIterations 默认为 10")
+    @DisplayName("Agent getMaxIterations 默认为 50")
     void agentDefaultMaxIterations() {
         Agent agent = createTestAgent();
-        assertEquals(10, agent.getMaxIterations());
+        assertEquals(50, agent.getMaxIterations());
     }
 
     @Test
@@ -268,9 +268,9 @@ class AgentTest {
         String description = team.getTeamToolsDescription();
         assertNotNull(description);
         assertFalse(description.isBlank());
-        assertTrue(description.contains("team_create"));
         assertTrue(description.contains("agent_create"));
         assertTrue(description.contains("agent_message"));
+        assertTrue(description.contains("agent_list"));
         assertTrue(description.contains("team_dissolve"));
     }
 

@@ -171,7 +171,94 @@ public class AgentTeam {
         log.info("团队 [{}] 已解散", teamId);
     }
 
-    // ==================== 团队工具定义 ====================
+    // ==================== 团队工具注册 ====================
+
+    /**
+     * 注册团队管理工具到领导者的 MCP 客户端，并更新领导者系统提示词。
+     * <p>
+     * 注册 4 个团队工具，使领导者能通过 LLM 自主创建工作者、分发任务、收集结果：
+     * <ol>
+     *   <li>{@code agent_create} — 创建工作者智能体（参数: name, system_prompt）</li>
+     *   <li>{@code agent_message} — 向工作者发送消息并获取回复（参数: worker_name, message）</li>
+     *   <li>{@code agent_list} — 列出所有工作者及状态（无参数）</li>
+     *   <li>{@code team_dissolve} — 解散团队（无参数）</li>
+     * </ol>
+     * 同时将团队工具描述注入领导者系统提示词，使 LLM 感知自身具备团队管理能力。
+     * </p>
+     */
+    public void registerTeamTools() {
+        // agent_create: 创建工作者
+        String agentCreateParams = """
+                {"type":"object","properties":{"name":{"type":"string","description":"工作者名称，需唯一"},"system_prompt":{"type":"string","description":"工作者的系统提示词，定义其角色和职责"}},"required":["name","system_prompt"]}""";
+        mcpClient.registerCustomTool("agent_create",
+                "创建一个工作者智能体来执行子任务",
+                agentCreateParams,
+                (args) -> {
+                    String workerName = String.valueOf(args.getOrDefault("name", ""));
+                    String workerPrompt = String.valueOf(args.getOrDefault("system_prompt", ""));
+                    if (workerName.isBlank()) {
+                        return "错误: 工作者名称不能为空";
+                    }
+                    Agent worker = createWorker(workerName, workerPrompt);
+                    return "工作者 [" + workerName + "] 已创建，ID: " + worker.getId();
+                });
+
+        // agent_message: 向工作者发送消息
+        String agentMessageParams = """
+                {"type":"object","properties":{"worker_name":{"type":"string","description":"目标工作者名称"},"message":{"type":"string","description":"发送给工作者的消息内容"}},"required":["worker_name","message"]}""";
+        mcpClient.registerCustomTool("agent_message",
+                "向指定工作者发送消息并获取其回复",
+                agentMessageParams,
+                (args) -> {
+                    String workerName = String.valueOf(args.getOrDefault("worker_name", ""));
+                    String message = String.valueOf(args.getOrDefault("message", ""));
+                    Msg reply = sendMessageToWorker(workerName, message);
+                    // 提取回复文本
+                    StringBuilder sb = new StringBuilder();
+                    for (ContentBlock block : reply.getContent()) {
+                        if (block instanceof ContentBlock.TextBlock textBlock) {
+                            sb.append(textBlock.getText());
+                        }
+                    }
+                    return "工作者 [" + workerName + "] 回复:\n" + sb;
+                });
+
+        // agent_list: 列出所有工作者
+        String agentListParams = """
+                {"type":"object","properties":{},"required":[]}""";
+        mcpClient.registerCustomTool("agent_list",
+                "列出团队中所有工作者及其状态",
+                agentListParams,
+                (args) -> {
+                    if (workers.isEmpty()) {
+                        return "当前团队没有工作者";
+                    }
+                    StringBuilder sb = new StringBuilder("团队工作者列表:\n");
+                    for (Map.Entry<String, Agent> entry : workers.entrySet()) {
+                        sb.append("- ").append(entry.getKey())
+                          .append(" (ID: ").append(entry.getValue().getId()).append(")\n");
+                    }
+                    return sb.toString().trim();
+                });
+
+        // team_dissolve: 解散团队
+        String teamDissolveParams = """
+                {"type":"object","properties":{},"required":[]}""";
+        mcpClient.registerCustomTool("team_dissolve",
+                "解散当前团队，关闭所有工作者",
+                teamDissolveParams,
+                (args) -> {
+                    int count = workers.size();
+                    dissolve();
+                    return "团队已解散，关闭了 " + count + " 个工作者";
+                });
+
+        // 将团队工具描述注入领导者系统提示词
+        leader.appendToSystemPrompt(getTeamToolsDescription());
+        log.info("团队 [{}] 已注册 4 个团队工具并更新领导者提示词", teamId);
+    }
+
+    // ==================== 团队工具描述 ====================
 
     /**
      * 获取团队工具描述列表，用于注入到领导者的系统提示词中。
@@ -184,21 +271,26 @@ public class AgentTeam {
      */
     public String getTeamToolsDescription() {
         return """
-                你是一个团队的领导者，拥有以下团队管理工具：
+                你现在是一个团队的领导者，拥有以下团队管理工具：
 
-                1. team_create - 创建一个新的协作团队
-                   参数: {"purpose": "团队目标描述"}
+                1. agent_create - 创建一个工作者智能体来执行子任务
+                   参数: {"name": "工作者名称", "system_prompt": "工作者的角色和职责描述"}
 
-                2. agent_create - 创建一个工作者智能体
-                   参数: {"name": "工作者名称", "system_prompt": "工作者的系统提示词"}
-
-                3. agent_message - 向指定工作者发送消息并获取回复
+                2. agent_message - 向指定工作者发送消息并获取其回复
                    参数: {"worker_name": "工作者名称", "message": "消息内容"}
 
-                4. team_dissolve - 解散当前团队
+                3. agent_list - 列出团队中所有工作者
                    参数: {}
 
-                当任务需要分工协作时，你应该创建工作者来并行处理子任务。
+                4. team_dissolve - 解散当前团队，关闭所有工作者
+                   参数: {}
+
+                当任务需要分工协作时，你应该：
+                - 用 agent_create 创建具有不同角色的工作者（如研究员、分析师、写作员）
+                - 用 agent_message 向工作者分发子任务并收集结果
+                - 用 agent_list 查看当前工作者状态
+                - 任务完成后用 team_dissolve 解散团队
+                - 综合各工作者的结果，给出最终答案
                 """;
     }
 

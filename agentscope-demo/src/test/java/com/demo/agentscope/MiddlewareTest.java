@@ -309,8 +309,8 @@ class MiddlewareTest {
     }
 
     @Test
-    @DisplayName("ReplyBudgetControlMiddleware 超过预算时抛出 BudgetExceededException")
-    void budgetExceededThrowsException() {
+    @DisplayName("ReplyBudgetControlMiddleware 超过预算时降级为警告（不抛异常）")
+    void budgetExceededDowngradedToWarning() {
         ReplyBudgetControlMiddleware budget = new ReplyBudgetControlMiddleware(100);
         chain.add(budget);
 
@@ -320,7 +320,9 @@ class MiddlewareTest {
         Msg response = new Msg("r1", "assistant", List.of(),
                 new Msg.TokenUsage(200, 100), null, null);
 
-        assertThrows(BudgetExceededException.class, () -> chain.fireModelCallEnd(ctx, response));
+        // 不再抛异常，Agent 可继续 ReAct 循环（由 maxIterations 兜底）
+        assertDoesNotThrow(() -> chain.fireModelCallEnd(ctx, response));
+        assertEquals(300, budget.getUsedTokens());
     }
 
     @Test

@@ -92,7 +92,7 @@ public class CodeExecutionManager {
         }
 
         try {
-            return executeProcess(PYTHON_CMD, tempFile.toString(), "python");
+            return executeProcess(new String[]{PYTHON_CMD, tempFile.toString()}, "python");
         } finally {
             try {
                 Files.deleteIfExists(tempFile);

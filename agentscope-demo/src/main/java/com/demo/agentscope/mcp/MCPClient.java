@@ -124,6 +124,20 @@ public class MCPClient {
         allToolInfos.add(new ToolInfo(name, description, "builtin", parametersJson));
     }
 
+    /**
+     * 注册自定义工具（公开接口，供外部组件如 AgentTeam 注入团队工具）。
+     *
+     * @param name           工具名称
+     * @param description    工具描述
+     * @param parametersJson 参数 schema（JSON 字符串）
+     * @param executor       工具执行器
+     */
+    public void registerCustomTool(String name, String description, String parametersJson,
+                                    BuiltinToolExecutor executor) {
+        registerBuiltin(name, description, parametersJson, executor);
+        log.info("已注册自定义工具: {}", name);
+    }
+
     /** 安全文件工作空间（用于文件读写工具） */
     private SecureFileWorkspace fileWorkspace;
 
@@ -139,10 +153,15 @@ public class MCPClient {
     public void registerFileTools(SecureFileWorkspace fileWorkspace) {
         this.fileWorkspace = Objects.requireNonNull(fileWorkspace, "文件工作空间不能为null");
 
+        // 默认文件名：LLM 未传 path 时使用，避免空路径触发权限拒绝
+        final String DEFAULT_FILE = "default.txt";
+        final String DEFAULT_DIR = ".";
+
         String readFileParams = """
-                {"type":"object","properties":{"path":{"type":"string","description":"要读取的文件路径（相对于工作空间根目录）"}},"required":["path"]}""";
+                {"type":"object","properties":{"path":{"type":"string","description":"要读取的文件路径（相对于工作空间根目录，不传则读取 default.txt）"}},"required":[]}""";
         registerBuiltin("read_file", "读取指定路径的文件内容", readFileParams, (args) -> {
-            String path = String.valueOf(args.getOrDefault("path", ""));
+            String raw = String.valueOf(args.getOrDefault("path", ""));
+            String path = raw == null || raw.isBlank() ? DEFAULT_FILE : raw;
             try {
                 return fileWorkspace.readFile(path);
             } catch (com.demo.agentscope.filepermission.FilePermissionDeniedException e) {
@@ -151,9 +170,10 @@ public class MCPClient {
         });
 
         String writeFileParams = """
-                {"type":"object","properties":{"path":{"type":"string","description":"要写入的文件路径"},"content":{"type":"string","description":"文件内容"}},"required":["path","content"]}""";
+                {"type":"object","properties":{"path":{"type":"string","description":"要写入的文件路径（不传则写入 default.txt）"},"content":{"type":"string","description":"文件内容"}},"required":["content"]}""";
         registerBuiltin("write_file", "将内容写入指定路径的文件", writeFileParams, (args) -> {
-            String path = String.valueOf(args.getOrDefault("path", ""));
+            String raw = String.valueOf(args.getOrDefault("path", ""));
+            String path = raw == null || raw.isBlank() ? DEFAULT_FILE : raw;
             String content = String.valueOf(args.getOrDefault("content", ""));
             try {
                 fileWorkspace.writeFile(path, content);
@@ -164,9 +184,10 @@ public class MCPClient {
         });
 
         String editFileParams = """
-                {"type":"object","properties":{"path":{"type":"string","description":"要编辑的文件路径"},"old_text":{"type":"string","description":"要替换的旧文本"},"new_text":{"type":"string","description":"替换后的新文本"}},"required":["path","old_text","new_text"]}""";
+                {"type":"object","properties":{"path":{"type":"string","description":"要编辑的文件路径（不传则编辑 default.txt）"},"old_text":{"type":"string","description":"要替换的旧文本"},"new_text":{"type":"string","description":"替换后的新文本"}},"required":["old_text","new_text"]}""";
         registerBuiltin("edit_file", "编辑文件，替换指定文本", editFileParams, (args) -> {
-            String path = String.valueOf(args.getOrDefault("path", ""));
+            String raw = String.valueOf(args.getOrDefault("path", ""));
+            String path = raw == null || raw.isBlank() ? DEFAULT_FILE : raw;
             String oldText = String.valueOf(args.getOrDefault("old_text", ""));
             String newText = String.valueOf(args.getOrDefault("new_text", ""));
             try {
@@ -178,9 +199,10 @@ public class MCPClient {
         });
 
         String listFilesParams = """
-                {"type":"object","properties":{"dir":{"type":"string","description":"要列出的目录路径"}},"required":["dir"]}""";
+                {"type":"object","properties":{"dir":{"type":"string","description":"要列出的目录路径（不传则列出工作空间根目录）"}},"required":[]}""";
         registerBuiltin("list_files", "列出指定目录下的文件和子目录", listFilesParams, (args) -> {
-            String dir = String.valueOf(args.getOrDefault("dir", ""));
+            String raw = String.valueOf(args.getOrDefault("dir", ""));
+            String dir = raw == null || raw.isBlank() ? DEFAULT_DIR : raw;
             try {
                 List<String> files = fileWorkspace.listFiles(dir);
                 return String.join("\n", files);
@@ -189,7 +211,7 @@ public class MCPClient {
             }
         });
 
-        log.info("已注册 4 个文件读写工具（受权限管控）");
+        log.info("已注册 4 个文件读写工具（受权限管控，未传 path 时使用默认位置）");
     }
 
     /**
@@ -414,9 +436,12 @@ public class MCPClient {
 
     /**
      * 内置工具执行器函数式接口。
+     * <p>
+     * 公开访问以便外部组件（如 AgentTeam）通过 {@link #registerCustomTool} 注入团队工具。
+     * </p>
      */
     @FunctionalInterface
-    private interface BuiltinToolExecutor {
+    public interface BuiltinToolExecutor {
         String execute(Map<String, Object> args) throws Exception;
     }
 

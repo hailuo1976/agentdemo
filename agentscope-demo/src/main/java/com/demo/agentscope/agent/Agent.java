@@ -47,8 +47,8 @@ public class Agent {
     /** 智能体名称 */
     private final String name;
 
-    /** 系统提示词 */
-    private final String systemPrompt;
+    /** 系统提示词（支持动态更新，如团队模式下注入团队工具描述） */
+    private String systemPrompt;
 
     /** 中间件链 */
     private final MiddlewareChain middlewareChain;
@@ -405,6 +405,26 @@ public class Agent {
 
     public String getSystemPrompt() {
         return systemPrompt;
+    }
+
+    /**
+     * 追加内容到系统提示词。
+     * <p>
+     * 用于团队模式下动态注入团队工具描述，使领导者感知自身具备团队管理能力。
+     * </p>
+     *
+     * @param additional 要追加的提示词内容
+     */
+    public void appendToSystemPrompt(String additional) {
+        if (additional == null || additional.isBlank()) {
+            return;
+        }
+        if (this.systemPrompt == null || this.systemPrompt.isBlank()) {
+            this.systemPrompt = additional;
+        } else {
+            this.systemPrompt = this.systemPrompt + "\n\n" + additional;
+        }
+        log.info("智能体 [{}] 系统提示词已更新（追加 {} 字符）", name, additional.length());
     }
 
     public MiddlewareChain getMiddlewareChain() {

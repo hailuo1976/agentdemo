@@ -284,6 +284,12 @@ public class AgentScopeDemoApplication {
         engine.addRule(new PermissionRule("execute_command", PermissionDecision.ALLOW, "Shell 命令执行，危险操作由 CommandSafetyChecker 拦截"));
         engine.addRule(new PermissionRule("install_package", PermissionDecision.ALLOW, "pip 安装，包名经过安全检查"));
 
+        // 允许团队管理工具（leader 自主编排 worker）
+        engine.addRule(new PermissionRule("agent_create", PermissionDecision.ALLOW, "创建工作者智能体"));
+        engine.addRule(new PermissionRule("agent_message", PermissionDecision.ALLOW, "向工作者发送消息"));
+        engine.addRule(new PermissionRule("agent_list", PermissionDecision.ALLOW, "列出团队工作者"));
+        engine.addRule(new PermissionRule("team_dissolve", PermissionDecision.ALLOW, "解散团队"));
+
         // 需要确认的工具
         engine.addRule(new PermissionRule("bash", PermissionDecision.ASK, "Shell 命令需人工确认"));
 
@@ -403,13 +409,13 @@ public class AgentScopeDemoApplication {
                         agent, chatModel, mcpClient,
                         credentialProvider, permissionEngine, workspaceManager, providerName
                 );
-                // 将团队工具描述注入领导者系统提示词
-                String teamToolsDesc = team.getTeamToolsDescription();
-                ConsoleUI.printSuccess("智能体团队已创建");
+                // 注册团队工具到 MCPClient 并更新领导者系统提示词
+                team.registerTeamTools();
+                ConsoleUI.printSuccess("智能体团队已创建，领导者已获得团队管理工具");
                 ConsoleUI.printInfo("领导者: " + agent.getName());
                 ConsoleUI.printInfo("团队ID: " + team.getTeamId());
                 ConsoleUI.printSeparator();
-                ConsoleUI.printInfo("团队工具描述已注入领导者提示词");
+                ConsoleUI.printInfo("可用团队工具: agent_create / agent_message / agent_list / team_dissolve");
                 continue;
             }
 
