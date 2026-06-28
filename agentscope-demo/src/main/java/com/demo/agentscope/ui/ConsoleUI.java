@@ -10,7 +10,10 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
-import java.util.Scanner;
+import org.jline.reader.LineReader;
+import org.jline.reader.LineReaderBuilder;
+import org.jline.terminal.Terminal;
+import org.jline.terminal.TerminalBuilder;
 
 /**
  * 控制台 UI 工具类。
@@ -21,6 +24,27 @@ import java.util.Scanner;
  * </p>
  */
 public class ConsoleUI {
+
+    // ==================== 输入读取器（UTF-8 编码） ====================
+
+    /**
+     * JLine3 LineReader：接管终端 raw mode，按字符（码点）处理退格，
+     * 绕开 macOS 终端 cooked mode 对 UTF-8 多字节字符退格回显的 bug。
+     * <p>
+     * 相比 BufferedReader，JLine3 自己负责行编辑和回显，
+     * 不依赖终端的 cooked mode，从而彻底解决中英文退格不一致的问题。
+     * </p>
+     */
+    private static final LineReader STDIN_READER;
+
+    static {
+        try {
+            Terminal terminal = TerminalBuilder.builder().system(true).build();
+            STDIN_READER = LineReaderBuilder.builder().terminal(terminal).build();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to initialize JLine3 terminal", e);
+        }
+    }
 
     // ==================== ANSI 颜色常量 ====================
 
@@ -61,15 +85,15 @@ public class ConsoleUI {
 
     /**
      * 显示用户输入提示符，读取用户输入。
+     * <p>
+     * 通过 JLine3 LineReader 接管终端输入，按字符（码点）处理退格，
+     * 彻底解决中文退格时屏幕回显与实际缓冲不一致的问题。
+     * </p>
      *
-     * @param scanner 标准输入扫描器
-     * @return 用户输入的文本，若无可读行则返回 null
+     * @return 用户输入的文本，若输入流结束则返回 null
      */
-    public static String promptUser(Scanner scanner) {
-        System.out.print(BLUE + "You ▶ " + RESET);
-        System.out.flush();
-        if (!scanner.hasNextLine()) return null;
-        return scanner.nextLine();
+    public static String promptUser() {
+        return STDIN_READER.readLine(BLUE + "You ▶ " + RESET);
     }
 
     // ==================== 智能体响应 ====================

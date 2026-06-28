@@ -2,6 +2,10 @@ package com.demo.pimono.ui;
 
 import com.demo.pimono.agent.ToolDefinition;
 import com.demo.pimono.context.Context;
+import org.jline.reader.LineReader;
+import org.jline.reader.LineReaderBuilder;
+import org.jline.terminal.Terminal;
+import org.jline.terminal.TerminalBuilder;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -9,6 +13,21 @@ import java.util.List;
 import java.util.Map;
 
 public class ConsoleUI {
+
+    /**
+     * JLine3 LineReader：接管终端 raw mode，按字符（码点）处理退格，
+     * 绕开 macOS 终端 cooked mode 对 UTF-8 多字节字符退格回显的 bug。
+     */
+    private static final LineReader READER;
+
+    static {
+        try {
+            Terminal terminal = TerminalBuilder.builder().system(true).build();
+            READER = LineReaderBuilder.builder().terminal(terminal).build();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to initialize JLine3 terminal", e);
+        }
+    }
 
     private static final String RESET = "\u001B[0m";
     private static final String GREEN = "\u001B[32m";
@@ -34,11 +53,8 @@ public class ConsoleUI {
         System.out.println();
     }
 
-    public static String promptUser(java.util.Scanner scanner) {
-        System.out.print(BLUE + "  You ▶ " + RESET);
-        System.out.flush();
-        if (!scanner.hasNextLine()) return null;
-        return scanner.nextLine();
+    public static String promptUser() {
+        return READER.readLine(BLUE + "  You ▶ " + RESET);
     }
 
     public static void printAgentResponse(String response, long durationMs) {

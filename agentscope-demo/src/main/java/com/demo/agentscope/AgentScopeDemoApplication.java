@@ -4,6 +4,10 @@ import com.demo.agentscope.agent.Agent;
 import com.demo.agentscope.agent.AgentTeam;
 import com.demo.agentscope.credential.CredentialProvider;
 import com.demo.agentscope.credential.DefaultCredentialProvider;
+import com.demo.agentscope.execution.CodeExecutionManager;
+import com.demo.agentscope.filepermission.FilePermissionConfig;
+import com.demo.agentscope.filepermission.FilePermissionManager;
+import com.demo.agentscope.filepermission.SecureFileWorkspace;
 import com.demo.agentscope.mcp.MCPClient;
 import com.demo.agentscope.mcp.MCPConfig;
 import com.demo.agentscope.message.Msg;
@@ -18,10 +22,12 @@ import com.demo.agentscope.permission.PermissionMiddleware;
 import com.demo.agentscope.permission.PermissionMode;
 import com.demo.agentscope.permission.PermissionRule;
 import com.demo.agentscope.ui.ConsoleUI;
+import com.demo.agentscope.workspace.LocalWorkspace;
 import com.demo.agentscope.workspace.WorkspaceManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
 import java.util.*;
 
 /**
@@ -50,7 +56,25 @@ public class AgentScopeDemoApplication {
     /** 智能体系统提示词 */
     private static final String SYSTEM_PROMPT = """
             你是 AgentScope 2.0 智能体助手。你可以通过调用工具来帮助用户完成各种任务。
+            可用工具包括：
+            - get_weather: 查询城市天气
+            - calculate: 数学计算
+            - search: 搜索信息
+            - get_time: 获取当前时间
+            - read_file: 读取文件内容（参数: path）
+            - write_file: 写入文件（参数: path, content）
+            - edit_file: 编辑文件（参数: path, old_text, new_text）
+            - list_files: 列出目录内容（参数: dir）
+            - execute_python: 执行 Python 代码并返回结果（参数: code，支持多行）
+            - execute_command: 执行 Shell 命令并返回结果（参数: command）
+            - install_package: 通过 pip 安装 Python 第三方库（参数: package）
+
             在回答问题时，如果需要获取实时信息或执行操作，请优先使用可用的工具。
+            当用户要求读取或写入文件时，使用对应的文件工具。
+            当需要计算、数据处理、网络请求或运行脚本时，使用 execute_python 执行代码并直接返回结果，不要只写代码让用户自己跑。
+            当执行失败时，请分析错误原因，修正代码后重试。
+            文件操作受权限管控，只能访问授权目录下的文件。
+            代码执行受安全策略限制（禁止危险命令、30秒超时）。
             回答时请保持简洁、准确，使用中文回复。
             """;
 
@@ -73,6 +97,15 @@ public class AgentScopeDemoApplication {
             // 从环境变量检测外部 MCP 服务器配置
             configureMCPServers(mcpClient);
             mcpClient.initialize();
+
+            // 4.1 创建安全文件工作空间并注册文件读写工具
+            SecureFileWorkspace secureFileWorkspace = createSecureFileWorkspace();
+            mcpClient.registerFileTools(secureFileWorkspace);
+
+            // 4.2 创建代码执行管理器并注册代码执行工具
+            CodeExecutionManager executionManager = new CodeExecutionManager(
+                    secureFileWorkspace.getPermissionManager().getBaseDir());
+            mcpClient.registerCodeExecutionTools(executionManager);
 
             // 5. 创建权限引擎，配置默认规则
             PermissionEngine permissionEngine = createPermissionEngine();
@@ -176,12 +209,56 @@ public class AgentScopeDemoApplication {
     }
 
     /**
+     * 创建安全文件工作空间。
+     * <p>
+     * 配置文件权限策略：允许在工作空间目录下读写文件，
+     * 但禁止访问 .env、secrets 等敏感路径，禁止 exe/sh 等可执行文件。
+     * 工作空间根目录默认为当前目录下的 workspace 文件夹。
+     * </p>
+     *
+     * @return 安全文件工作空间
+     */
+    private static SecureFileWorkspace createSecureFileWorkspace() {
+        // 工作空间根目录
+        String workspaceDir = System.getenv().getOrDefault("WORKSPACE_DIR", "workspace");
+        Path baseDir = Path.of(workspaceDir).toAbsolutePath().normalize();
+
+        // 创建根目录（如果不存在）
+        baseDir.toFile().mkdirs();
+
+        // 配置文件权限策略
+        FilePermissionConfig config = new FilePermissionConfig.Builder()
+                .allowReadWrite("**")
+                .denyPath("**/.env")
+                .denyPath("**/secrets/**")
+                .denyPath("**/.git/**")
+                .denyExtension("exe")
+                .denyExtension("sh")
+                .denyExtension("bat")
+                .maxFileSize(10 * 1024 * 1024)  // 10MB
+                .defaultPolicy(FilePermissionConfig.DefaultPolicy.DENY_ALL)
+                .build();
+
+        FilePermissionManager permissionManager = new FilePermissionManager(baseDir, config);
+        LocalWorkspace localWorkspace = new LocalWorkspace(baseDir.toString());
+        localWorkspace.initialize();
+
+        SecureFileWorkspace secureWorkspace = new SecureFileWorkspace(localWorkspace, permissionManager);
+        log.info("安全文件工作空间已创建: baseDir={}, 权限策略={}", baseDir, config.getDefaultPolicy());
+        return secureWorkspace;
+    }
+
+    /**
      * 创建权限引擎，配置默认权限规则。
      * <p>
      * 默认规则：
      * <ul>
-     *   <li>ALLOW: get_weather, search, get_time, calculate - 安全只读工具</li>
-     *   <li>ASK: bash, write - 需要人工确认的写入工具</li>
+     *   <li>ALLOW: get_weather, search, get_time, calculate - 安全工具</li>
+     *   <li>ALLOW: read_file, write_file, edit_file, list_files - 文件工具
+     *       （文件级权限由 SecureFileWorkspace 的 FilePermissionManager 管控）</li>
+     *   <li>ALLOW: execute_python, execute_command, install_package - 代码执行工具
+     *       （命令级安全由 CommandSafetyChecker 管控，30秒超时）</li>
+     *   <li>ASK: bash - 需要人工确认的 Shell 工具</li>
      *   <li>DENY: 危险操作模式 - 内置引擎自动拦截</li>
      * </ul>
      * 默认模式为 DONT_ASK（ASK 决策自动降级为 DENY）。
@@ -196,9 +273,19 @@ public class AgentScopeDemoApplication {
         engine.addRule(new PermissionRule("get_time", PermissionDecision.ALLOW, "时间查询为安全操作"));
         engine.addRule(new PermissionRule("calculate", PermissionDecision.ALLOW, "计算为安全操作"));
 
+        // 允许文件工具（文件级权限由 FilePermissionManager 管控）
+        engine.addRule(new PermissionRule("read_file", PermissionDecision.ALLOW, "文件读取，路径权限由 FilePermissionManager 管控"));
+        engine.addRule(new PermissionRule("write_file", PermissionDecision.ALLOW, "文件写入，路径权限由 FilePermissionManager 管控"));
+        engine.addRule(new PermissionRule("edit_file", PermissionDecision.ALLOW, "文件编辑，路径权限由 FilePermissionManager 管控"));
+        engine.addRule(new PermissionRule("list_files", PermissionDecision.ALLOW, "目录列表，路径权限由 FilePermissionManager 管控"));
+
+        // 允许代码执行工具（命令级安全由 CommandSafetyChecker 管控）
+        engine.addRule(new PermissionRule("execute_python", PermissionDecision.ALLOW, "Python 执行，危险操作由 CommandSafetyChecker 拦截"));
+        engine.addRule(new PermissionRule("execute_command", PermissionDecision.ALLOW, "Shell 命令执行，危险操作由 CommandSafetyChecker 拦截"));
+        engine.addRule(new PermissionRule("install_package", PermissionDecision.ALLOW, "pip 安装，包名经过安全检查"));
+
         // 需要确认的工具
         engine.addRule(new PermissionRule("bash", PermissionDecision.ASK, "Shell 命令需人工确认"));
-        engine.addRule(new PermissionRule("write", PermissionDecision.ASK, "写入操作需人工确认"));
 
         log.info("权限引擎已创建，模式={}，规则数={}", engine.getMode(), engine.getRules().size());
         return engine;
@@ -246,12 +333,11 @@ public class AgentScopeDemoApplication {
                                 PermissionEngine permissionEngine,
                                 WorkspaceManager workspaceManager,
                                 String providerName) {
-        Scanner scanner = new Scanner(System.in);
         AgentTeam team = null;
         boolean showEvents = false;
 
         while (true) {
-            String input = ConsoleUI.promptUser(scanner);
+            String input = ConsoleUI.promptUser();
             if (input == null) {
                 // 输入流结束
                 break;
@@ -430,7 +516,5 @@ public class AgentScopeDemoApplication {
                 ConsoleUI.printInfo("输入 help 查看可用命令");
             }
         }
-
-        scanner.close();
     }
 }

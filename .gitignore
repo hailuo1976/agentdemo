@@ -20,6 +20,7 @@ dependency-reduced-pom.xml
 
 # ===== Agent 运行时工作空间（多租户沙箱产物） =====
 agentscope-demo/workspace/
+/workspace/
 
 # ===== 旧的 HTML 文档（可重新生成，不入库） =====
 project-documentation.html

@@ -10,7 +10,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
-import java.util.Scanner;
 
 public class PiMonoDemoApplication {
 
@@ -52,9 +51,8 @@ public class PiMonoDemoApplication {
             ConsoleUI.printInfo("Type 'exit' to quit, 'history' for conversation, 'status' for agent status, 'help' for commands");
             ConsoleUI.printSeparator();
 
-            Scanner scanner = new Scanner(System.in);
             while (true) {
-                String userInput = ConsoleUI.promptUser(scanner);
+                String userInput = ConsoleUI.promptUser();
                 if (userInput == null || userInput.isBlank()) {
                     continue;
                 }
@@ -101,8 +99,6 @@ public class PiMonoDemoApplication {
                     ConsoleUI.printInfo("You can continue the conversation or type 'help' for available commands.");
                 }
             }
-
-            scanner.close();
         } catch (Exception e) {
             log.error("Failed to initialize application", e);
             ConsoleUI.printError("Initialization failed: " + e.getMessage());

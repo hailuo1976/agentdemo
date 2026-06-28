@@ -234,10 +234,23 @@ public class ChatModel {
                 functionNode.put("name", toolInfo.name());
                 functionNode.put("description", toolInfo.description());
 
+                // 使用工具提供的参数 schema，为空则用默认空 schema
                 ObjectNode paramsNode = functionNode.putObject("parameters");
-                paramsNode.put("type", "object");
-                paramsNode.putObject("properties");
-                paramsNode.putArray("required");
+                String paramsJson = toolInfo.parametersJson();
+                if (paramsJson != null && !paramsJson.isBlank()) {
+                    try {
+                        paramsNode.setAll(OBJECT_MAPPER.readValue(paramsJson, ObjectNode.class));
+                    } catch (Exception e) {
+                        log.warn("解析工具 [{}] 参数 schema 失败，使用默认空 schema", toolInfo.name());
+                        paramsNode.put("type", "object");
+                        paramsNode.putObject("properties");
+                        paramsNode.putArray("required");
+                    }
+                } else {
+                    paramsNode.put("type", "object");
+                    paramsNode.putObject("properties");
+                    paramsNode.putArray("required");
+                }
             }
         }
 
