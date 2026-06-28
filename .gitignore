@@ -1,0 +1,29 @@
+# ===== 本地脚本（含个人路径/密钥相关，不提交） =====
+start*.sh
+
+# ===== 构建产物 =====
+target/
+*.class
+dependency-reduced-pom.xml
+
+# ===== IDE / 编辑器 =====
+.idea/
+*.iml
+.vscode/
+*.swp
+.DS_Store
+
+# ===== 本地工具链 / 索引 / 配置 =====
+.codegraph/
+.claude/
+.tools/
+
+# ===== Agent 运行时工作空间（多租户沙箱产物） =====
+agentscope-demo/workspace/
+
+# ===== 旧的 HTML 文档（可重新生成，不入库） =====
+project-documentation.html
+
+# ===== 日志 =====
+*.log
+logs/
