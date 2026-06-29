@@ -6,6 +6,8 @@ import com.demo.agentscope.message.ContentBlock;
 import com.demo.agentscope.message.Msg;
 import com.demo.agentscope.model.ChatModel;
 import com.demo.agentscope.permission.PermissionEngine;
+import com.demo.agentscope.ui.TeamProgressTracker;
+import com.demo.agentscope.ui.VerbosityLevel;
 import com.demo.agentscope.workspace.WorkspaceManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,6 +55,9 @@ public class AgentTeam {
     private final WorkspaceManager workspaceManager;
     private final String providerName;
 
+    /** 团队进度跟踪器 */
+    private final TeamProgressTracker progressTracker;
+
     /**
      * 构造智能体团队。
      *
@@ -77,6 +82,7 @@ public class AgentTeam {
         this.permissionEngine = permissionEngine;
         this.workspaceManager = workspaceManager;
         this.providerName = providerName;
+        this.progressTracker = new TeamProgressTracker(teamId, leader.getName(), VerbosityLevel.fromEnv());
 
         log.info("智能体团队已创建: teamId={}, leader={}", teamId, leader.getName());
     }
@@ -133,6 +139,10 @@ public class AgentTeam {
 
         workers.put(name, worker);
         log.info("团队 [{}] 创建工作者: name={}, id={}", teamId, name, worker.getId());
+
+        // 进度跟踪：创建工作者
+        progressTracker.onLeaderCreateWorker(name, "工作者");
+
         return worker;
     }
 
@@ -150,7 +160,20 @@ public class AgentTeam {
             return new Msg(UUID.randomUUID().toString(), "assistant",
                     List.of(new ContentBlock.TextBlock("工作者 " + workerName + " 不存在")));
         }
-        return worker.reply(message);
+
+        // 进度跟踪：分配任务
+        progressTracker.onLeaderAssignTask(workerName, message);
+        progressTracker.onAgentCommunication(leader.getName(), workerName, message);
+
+        long startTime = System.currentTimeMillis();
+        progressTracker.onWorkerStart(workerName, message);
+
+        Msg reply = worker.reply(message);
+
+        long duration = System.currentTimeMillis() - startTime;
+        progressTracker.onWorkerComplete(workerName, true, duration);
+
+        return reply;
     }
 
     /**
@@ -337,5 +360,9 @@ public class AgentTeam {
 
     public boolean isActive() {
         return active;
+    }
+
+    public TeamProgressTracker getProgressTracker() {
+        return progressTracker;
     }
 }

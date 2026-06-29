@@ -26,79 +26,16 @@ class MCPClientTest {
     }
 
     @Test
-    @DisplayName("MCPClient initialize 注册内置工具")
-    void initializeRegistersBuiltinTools() {
+    @DisplayName("MCPClient initialize 初始化成功")
+    void initializeSuccess() {
         assertTrue(client.isInitialized());
-        assertFalse(client.listTools().isEmpty());
     }
 
     @Test
-    @DisplayName("listTools 返回 4 个内置工具")
-    void listToolsReturns4BuiltinTools() {
+    @DisplayName("listTools 返回空列表（内置工具已移除）")
+    void listToolsReturnsEmpty() {
         List<MCPClient.ToolInfo> tools = client.listTools();
-        assertEquals(4, tools.size());
-
-        List<String> toolNames = tools.stream().map(MCPClient.ToolInfo::name).toList();
-        assertTrue(toolNames.contains("get_weather"));
-        assertTrue(toolNames.contains("calculate"));
-        assertTrue(toolNames.contains("search"));
-        assertTrue(toolNames.contains("get_time"));
-    }
-
-    @Test
-    @DisplayName("executeTool get_weather 返回成功")
-    void executeToolGetWeather() {
-        MCPClient.ToolResult result = client.executeTool("get_weather",
-                Map.of("city", "Beijing", "unit", "celsius"));
-
-        assertTrue(result.isSuccess());
-        assertNotNull(result.getOutput());
-        assertTrue(result.getOutput().contains("Beijing"));
-        assertTrue(result.getOutput().contains("22.0"));
-        assertNull(result.getError());
-    }
-
-    @Test
-    @DisplayName("executeTool calculate 返回正确结果")
-    void executeToolCalculate() {
-        MCPClient.ToolResult result = client.executeTool("calculate",
-                Map.of("expression", "2+3*4"));
-
-        assertTrue(result.isSuccess());
-        assertNotNull(result.getOutput());
-        assertTrue(result.getOutput().contains("14"));
-    }
-
-    @Test
-    @DisplayName("executeTool calculate 复杂表达式")
-    void executeToolCalculateComplex() {
-        MCPClient.ToolResult result = client.executeTool("calculate",
-                Map.of("expression", "(10+5)*3"));
-
-        assertTrue(result.isSuccess());
-        assertTrue(result.getOutput().contains("45"));
-    }
-
-    @Test
-    @DisplayName("executeTool search 返回成功")
-    void executeToolSearch() {
-        MCPClient.ToolResult result = client.executeTool("search",
-                Map.of("query", "AgentScope"));
-
-        assertTrue(result.isSuccess());
-        assertNotNull(result.getOutput());
-        assertTrue(result.getOutput().contains("AgentScope"));
-    }
-
-    @Test
-    @DisplayName("executeTool get_time 返回成功")
-    void executeToolGetTime() {
-        MCPClient.ToolResult result = client.executeTool("get_time",
-                Map.of("timezone", "UTC"));
-
-        assertTrue(result.isSuccess());
-        assertNotNull(result.getOutput());
-        assertTrue(result.getOutput().contains("UTC"));
+        assertEquals(0, tools.size());
     }
 
     @Test
@@ -115,8 +52,7 @@ class MCPClientTest {
     @Test
     @DisplayName("ToolResult toToolResultBlock 转换正确")
     void toolResultToToolResultBlock() {
-        MCPClient.ToolResult result = client.executeTool("get_weather",
-                Map.of("city", "Beijing"));
+        MCPClient.ToolResult result = new MCPClient.ToolResult(true, "测试输出", null);
 
         var block = result.toToolResultBlock("call_0");
         assertEquals("call_0", block.getToolCallId());
@@ -192,26 +128,5 @@ class MCPClientTest {
         newClient.addConfig(new MCPConfig.StdioMCPConfig("test", "echo", List.of()));
         // 配置已添加但未初始化
         assertFalse(newClient.isInitialized());
-    }
-
-    // ==================== SimpleExpressionEvaluator 测试 ====================
-
-    @Test
-    @DisplayName("SimpleExpressionEvaluator 基本算术运算")
-    void expressionEvaluator() {
-        MCPClient.SimpleExpressionEvaluator evaluator = new MCPClient.SimpleExpressionEvaluator();
-
-        assertEquals(7.0, evaluator.evaluate("3+4"), 0.001);
-        assertEquals(12.0, evaluator.evaluate("3*4"), 0.001);
-        assertEquals(2.0, evaluator.evaluate("6/3"), 0.001);
-        assertEquals(-1.0, evaluator.evaluate("3-4"), 0.001);
-    }
-
-    @Test
-    @DisplayName("SimpleExpressionEvaluator 括号运算")
-    void expressionEvaluatorWithParentheses() {
-        MCPClient.SimpleExpressionEvaluator evaluator = new MCPClient.SimpleExpressionEvaluator();
-        assertEquals(14.0, evaluator.evaluate("2*(3+4)"), 0.001);
-        assertEquals(10.0, evaluator.evaluate("(2+3)*2"), 0.001);
     }
 }

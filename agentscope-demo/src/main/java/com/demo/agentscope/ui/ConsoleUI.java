@@ -393,6 +393,7 @@ public class ConsoleUI {
         System.out.println("  " + CYAN + "tools" + RESET + "      - 列出可用的 MCP 工具");
         System.out.println("  " + CYAN + "events" + RESET + "     - 切换事件展示模式");
         System.out.println("  " + CYAN + "permission" + RESET + " - 显示权限规则");
+        System.out.println("  " + CYAN + "verbosity" + RESET + "  - 调整界面信息详细程度");
         System.out.println("  " + CYAN + "help" + RESET + "       - 显示此帮助信息");
         System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
         System.out.println();

@@ -10,6 +10,8 @@ import com.demo.agentscope.middleware.AgentContext;
 import com.demo.agentscope.middleware.MiddlewareChain;
 import com.demo.agentscope.model.ChatModel;
 import com.demo.agentscope.permission.PermissionEngine;
+import com.demo.agentscope.ui.AgentProgressTracker;
+import com.demo.agentscope.ui.VerbosityLevel;
 import com.demo.agentscope.workspace.WorkspaceManager;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -80,6 +82,9 @@ public class Agent {
     /** 最大工具调用迭代次数 */
     private int maxIterations;
 
+    /** 进度跟踪器 */
+    private AgentProgressTracker progressTracker;
+
     /**
      * 构造智能体。
      */
@@ -102,6 +107,7 @@ public class Agent {
         this.agentState = new HashMap<>();
         this.providerName = providerName;
         this.maxIterations = 50;
+        this.progressTracker = new AgentProgressTracker(name, VerbosityLevel.fromEnv());
 
         log.info("智能体已创建: id={}, name={}", id, name);
     }
@@ -128,9 +134,13 @@ public class Agent {
     public Msg reply(String userInput) {
         log.info("智能体 [{}] 收到用户输入: {}", name, userInput);
 
+        // 进度跟踪
+        progressTracker.onReplyStart(userInput);
+        long replyStartTime = System.currentTimeMillis();
+
         // 创建智能体上下文
         AgentContext ctx = new AgentContext(id, UUID.randomUUID().toString(), "default");
-        ctx.setReplyStartTime(System.currentTimeMillis());
+        ctx.setReplyStartTime(replyStartTime);
         ctx.setAttribute("userInput", userInput);
 
         // 触发 onReplyStart
@@ -152,6 +162,9 @@ public class Agent {
             for (int iteration = 0; iteration < maxIterations; iteration++) {
                 log.debug("智能体 [{}] 第 {} 次迭代", name, iteration + 1);
 
+                // 进度跟踪：模型调用开始
+                progressTracker.onModelCallStart();
+
                 // 构建发送给模型的消息列表
                 List<Msg> messages = buildMessages();
 
@@ -164,7 +177,14 @@ public class Agent {
                 middlewareChain.fireModelCall(ctx, requestMsg);
 
                 // 调用 LLM
+                long modelStartTime = System.currentTimeMillis();
                 Msg response = chatModel.chat(providerName, messages, tools);
+
+                // 进度跟踪：模型调用完成
+                Msg.TokenUsage usage = response.getUsage();
+                if (usage != null) {
+                    progressTracker.onModelCallComplete(usage.getPromptTokens(), usage.getCompletionTokens());
+                }
 
                 // 触发 onModelCallEnd
                 middlewareChain.fireModelCallEnd(ctx, response);
@@ -184,6 +204,9 @@ public class Agent {
                 for (ContentBlock.ToolCallBlock toolCall : response.getToolCalls()) {
                     log.info("智能体 [{}] 调用工具: {}", name, toolCall.getName());
 
+                    // 进度跟踪：工具调用
+                    progressTracker.onToolCall(toolCall.getName());
+
                     // 触发 onToolCall
                     middlewareChain.fireToolCall(ctx, toolCall);
 
@@ -198,14 +221,25 @@ public class Agent {
                         context.add(toolResultMsg);
                         middlewareChain.fireToolResult(ctx, deniedResult);
                         eventStream.emit(AgentEvent.toolResult(id, toolCall.getName(), "权限拒绝"));
+                        progressTracker.onToolCallComplete(toolCall.getName(), false, 0);
                         continue;
                     }
 
                     // 执行工具
+                    long toolStartTime = System.currentTimeMillis();
                     MCPClient.ToolResult toolResult = mcpClient.executeTool(toolCall.getName(), toolArgs);
+                    long toolDuration = System.currentTimeMillis() - toolStartTime;
+
+                    // 进度跟踪：工具调用完成
+                    progressTracker.onToolCallComplete(toolCall.getName(), toolResult.isSuccess(), toolDuration);
+
+                    // 截断大型工具结果（特别是团队模式下的工作者回复）
+                    String resultContent = toolResult.isSuccess() ? toolResult.getOutput() : toolResult.getError();
+                    resultContent = truncateToolResult(resultContent, toolCall.getName());
 
                     // 构建工具结果消息
-                    ContentBlock.ToolResultBlock resultBlock = toolResult.toToolResultBlock(toolCall.getId());
+                    ContentBlock.ToolResultBlock resultBlock = new ContentBlock.ToolResultBlock(
+                            toolCall.getId(), resultContent, !toolResult.isSuccess());
                     Msg toolResultMsg = buildToolResultMsg(resultBlock);
                     context.add(toolResultMsg);
 
@@ -213,7 +247,6 @@ public class Agent {
                     middlewareChain.fireToolResult(ctx, resultBlock);
 
                     // 发射事件
-                    String resultContent = toolResult.isSuccess() ? toolResult.getOutput() : toolResult.getError();
                     eventStream.emit(AgentEvent.toolResult(id, toolCall.getName(), resultContent));
                 }
             }
@@ -228,14 +261,22 @@ public class Agent {
             }
         } catch (Exception e) {
             log.error("智能体 [{}] 回复过程异常", name, e);
+            progressTracker.onError(e.getMessage());
             finalResponse = new Msg(UUID.randomUUID().toString(), "assistant",
                     List.of(new ContentBlock.TextBlock("处理过程中发生错误: " + e.getMessage())));
             eventStream.emit(AgentEvent.error(id, e.getMessage()));
         }
 
+        // 将上下文传递给中间件，供 ContextCompressionMiddleware 使用
+        ctx.setAttribute("contextMessages", context);
+
         // 触发 onReplyEnd
         middlewareChain.fireReplyEnd(ctx, eventStream);
         eventStream.emit(AgentEvent.replyEnd(id));
+
+        // 进度跟踪：回复完成
+        long replyDuration = System.currentTimeMillis() - replyStartTime;
+        progressTracker.onReplyComplete(replyDuration);
 
         // 更新状态
         agentState.put("lastReplyTime", Instant.now().toString());
@@ -362,6 +403,40 @@ public class Agent {
      */
     private Msg buildToolResultMsg(ContentBlock.ToolResultBlock resultBlock) {
         return new Msg(UUID.randomUUID().toString(), "tool", List.of(resultBlock));
+    }
+
+    /**
+     * 截断大型工具结果，防止上下文爆炸。
+     * <p>
+     * 团队模式下的工作者回复可能包含数千 token，直接注入上下文会导致内存快速膨胀。
+     * 对于 agent_message 等团队工具，将结果截断到合理长度。
+     * </p>
+     *
+     * @param content  工具结果内容
+     * @param toolName 工具名称
+     * @return 截断后的内容
+     */
+    private String truncateToolResult(String content, String toolName) {
+        if (content == null || content.isEmpty()) {
+            return content;
+        }
+
+        // 团队工具结果截断阈值（字符数）
+        // 团队工具的工作者回复通常很长，需要严格截断
+        int maxChars = switch (toolName) {
+            case "agent_message" -> 20000;  // 工作者回复截断到 2000 字符
+            case "agent_create" -> 500;    // 创建结果较短
+            case "agent_list" -> 5000;     // 列表结果中等
+            default -> 5000;              // 其他工具保持较大阈值
+        };
+
+        if (content.length() > maxChars) {
+            String truncated = content.substring(0, maxChars) + 
+                    "\n\n[... 内容已截断，共 " + content.length() + " 字符，保留 " + maxChars + " 字符 ...]";
+            log.debug("工具 [{}] 结果已截断: {} -> {} 字符", toolName, content.length(), maxChars);
+            return truncated;
+        }
+        return content;
     }
 
     // ==================== 状态管理 ====================

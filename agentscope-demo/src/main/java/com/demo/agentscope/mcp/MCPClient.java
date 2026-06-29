@@ -66,46 +66,11 @@ public class MCPClient {
     /**
      * 注册内置工具。
      * <p>
-     * 4个内置演示工具：get_weather、calculate、search、get_time。
+     * 内置工具已移除，仅保留文件操作、代码执行和团队工具等核心功能。
      * </p>
      */
     public void registerBuiltinTools() {
-        // get_weather - 获取城市天气
-        registerBuiltin("get_weather", "获取指定城市的当前天气信息", (args) -> {
-            String city = String.valueOf(args.getOrDefault("city", "Unknown"));
-            String unit = String.valueOf(args.getOrDefault("unit", "celsius"));
-            double temp = "fahrenheit".equalsIgnoreCase(unit) ? 72.0 : 22.0;
-            return String.format(
-                    "{\"city\":\"%s\",\"temperature\":%.1f,\"unit\":\"%s\",\"condition\":\"Partly Cloudy\",\"humidity\":58,\"wind_speed\":15}",
-                    city, temp, unit);
-        });
-
-        // calculate - 数学表达式计算
-        registerBuiltin("calculate", "计算数学表达式的结果（支持 +、-、*、/、括号和数字）", (args) -> {
-            String expression = String.valueOf(args.getOrDefault("expression", "0"));
-            try {
-                double result = new SimpleExpressionEvaluator().evaluate(expression);
-                return String.format("{\"result\":%.4f,\"expression\":\"%s\"}", result, expression);
-            } catch (Exception e) {
-                throw new RuntimeException("计算错误: " + e.getMessage(), e);
-            }
-        });
-
-        // search - 搜索信息
-        registerBuiltin("search", "搜索相关信息", (args) -> {
-            String query = String.valueOf(args.getOrDefault("query", ""));
-            return String.format(
-                    "{\"query\":\"%s\",\"results\":[{\"title\":\"Search Result\",\"snippet\":\"Information about %s\"}]}",
-                    query, query);
-        });
-
-        // get_time - 获取当前时间
-        registerBuiltin("get_time", "获取当前时间", (args) -> {
-            String timezone = String.valueOf(args.getOrDefault("timezone", "UTC"));
-            return String.format("{\"timezone\":\"%s\",\"time\":\"%s\"}", timezone, ZonedDateTime.now().toString());
-        });
-
-        log.info("已注册 {} 个内置工具", builtinTools.size());
+        log.info("内置工具注册完成（已移除演示工具）");
     }
 
     /**

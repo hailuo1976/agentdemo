@@ -22,6 +22,7 @@ import com.demo.agentscope.permission.PermissionMiddleware;
 import com.demo.agentscope.permission.PermissionMode;
 import com.demo.agentscope.permission.PermissionRule;
 import com.demo.agentscope.ui.ConsoleUI;
+import com.demo.agentscope.ui.VerbosityLevel;
 import com.demo.agentscope.workspace.LocalWorkspace;
 import com.demo.agentscope.workspace.WorkspaceManager;
 import org.slf4j.Logger;
@@ -57,10 +58,6 @@ public class AgentScopeDemoApplication {
     private static final String SYSTEM_PROMPT = """
             你是 AgentScope 2.0 智能体助手。你可以通过调用工具来帮助用户完成各种任务。
             可用工具包括：
-            - get_weather: 查询城市天气
-            - calculate: 数学计算
-            - search: 搜索信息
-            - get_time: 获取当前时间
             - read_file: 读取文件内容（参数: path）
             - write_file: 写入文件（参数: path, content）
             - edit_file: 编辑文件（参数: path, old_text, new_text）
@@ -137,6 +134,11 @@ public class AgentScopeDemoApplication {
 
             // 打印启动信息
             printStartupInfo(primaryProvider, modelName, mcpClient, permissionEngine);
+
+            // 显示当前详细程度
+            VerbosityLevel verbosity = VerbosityLevel.fromEnv();
+            ConsoleUI.printInfo("界面详细程度: " + verbosity.getDisplayName() + " - " + verbosity.getDescription());
+            ConsoleUI.printInfo("可通过 verbosity 命令调整详细程度，或设置环境变量 VERBOSITY=MINIMAL|STANDARD|VERBOSE|DEBUG");
 
             // 9. 进入 REPL 主循环
             runREPL(agent, credentialProvider, chatModel, mcpClient, permissionEngine, workspaceManager, primaryProvider);
@@ -489,6 +491,31 @@ public class AgentScopeDemoApplication {
 
             if ("help".equalsIgnoreCase(trimmed)) {
                 ConsoleUI.printHelp();
+                continue;
+            }
+
+            if (trimmed.toLowerCase().startsWith("verbosity")) {
+                // 调整详细程度
+                String[] parts = trimmed.split("\\s+", 2);
+                if (parts.length == 1) {
+                    // 无参数：循环切换
+                    VerbosityLevel current = VerbosityLevel.fromEnv();
+                    VerbosityLevel next = current.next();
+                    System.setProperty("verbosity.level", next.name());
+                    ConsoleUI.printInfo("界面详细程度已切换: " + current.getDisplayName() + " → " + next.getDisplayName());
+                    ConsoleUI.printInfo(next.getDescription());
+                } else {
+                    // 指定级别
+                    try {
+                        VerbosityLevel level = VerbosityLevel.valueOf(parts[1].toUpperCase());
+                        System.setProperty("verbosity.level", level.name());
+                        ConsoleUI.printSuccess("界面详细程度已设置为: " + level.getDisplayName());
+                        ConsoleUI.printInfo(level.getDescription());
+                    } catch (IllegalArgumentException e) {
+                        ConsoleUI.printError("无效的级别: " + parts[1]);
+                        ConsoleUI.printInfo("可选: MINIMAL / STANDARD / VERBOSE / DEBUG");
+                    }
+                }
                 continue;
             }
 
