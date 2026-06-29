@@ -164,10 +164,9 @@ public class AgentTeam {
         // 进度跟踪：分配任务
         progressTracker.onLeaderAssignTask(workerName, message);
         progressTracker.onAgentCommunication(leader.getName(), workerName, message);
-
-        long startTime = System.currentTimeMillis();
         progressTracker.onWorkerStart(workerName, message);
 
+        long startTime = System.currentTimeMillis();
         Msg reply = worker.reply(message);
 
         long duration = System.currentTimeMillis() - startTime;

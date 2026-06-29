@@ -82,7 +82,7 @@ public class Agent {
     /** 最大工具调用迭代次数 */
     private int maxIterations;
 
-    /** 进度跟踪器 */
+    /** 进度跟踪器（每次 reply 时按当前 verbosity 重建） */
     private AgentProgressTracker progressTracker;
 
     /**
@@ -107,7 +107,6 @@ public class Agent {
         this.agentState = new HashMap<>();
         this.providerName = providerName;
         this.maxIterations = 50;
-        this.progressTracker = new AgentProgressTracker(name, VerbosityLevel.fromEnv());
 
         log.info("智能体已创建: id={}, name={}", id, name);
     }
@@ -134,7 +133,8 @@ public class Agent {
     public Msg reply(String userInput) {
         log.info("智能体 [{}] 收到用户输入: {}", name, userInput);
 
-        // 进度跟踪
+        // 进度跟踪：每次回复都按当前 verbosity 重建跟踪器，使 REPL 的 verbosity 调整立即生效
+        this.progressTracker = new AgentProgressTracker(name, VerbosityLevel.fromEnv());
         progressTracker.onReplyStart(userInput);
         long replyStartTime = System.currentTimeMillis();
 
@@ -422,12 +422,11 @@ public class Agent {
         }
 
         // 团队工具结果截断阈值（字符数）
-        // 团队工具的工作者回复通常很长，需要严格截断
         int maxChars = switch (toolName) {
-            case "agent_message" -> 20000;  // 工作者回复截断到 2000 字符
+            case "agent_message" -> 20000;  // 工作者回复可能较长
             case "agent_create" -> 500;    // 创建结果较短
             case "agent_list" -> 5000;     // 列表结果中等
-            default -> 5000;              // 其他工具保持较大阈值
+            default -> 5000;              // 其他工具
         };
 
         if (content.length() > maxChars) {

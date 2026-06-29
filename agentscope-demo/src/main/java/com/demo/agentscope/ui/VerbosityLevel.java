@@ -37,11 +37,21 @@ public enum VerbosityLevel {
     }
 
     /**
-     * 从环境变量解析详细程度级别。
+     * 解析当前详细程度级别。
+     * <p>
+     * 优先级：系统属性 {@code verbosity.level}（REPL 运行时覆盖）&gt; 环境变量 {@code VERBOSITY} &gt; 默认 STANDARD。
      *
-     * @return 详细程度级别，默认为 STANDARD
+     * @return 详细程度级别
      */
     public static VerbosityLevel fromEnv() {
+        String prop = System.getProperty("verbosity.level");
+        if (prop != null && !prop.isBlank()) {
+            try {
+                return VerbosityLevel.valueOf(prop.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                // fall through
+            }
+        }
         String env = System.getenv("VERBOSITY");
         if (env == null || env.isBlank()) {
             return STANDARD;
