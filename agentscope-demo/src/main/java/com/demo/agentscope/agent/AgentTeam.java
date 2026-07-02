@@ -6,6 +6,7 @@ import com.demo.agentscope.message.ContentBlock;
 import com.demo.agentscope.message.Msg;
 import com.demo.agentscope.model.ChatModel;
 import com.demo.agentscope.permission.PermissionEngine;
+import com.demo.agentscope.team.SharedKnowledgeBase;
 import com.demo.agentscope.ui.TeamProgressTracker;
 import com.demo.agentscope.ui.VerbosityLevel;
 import com.demo.agentscope.workspace.WorkspaceManager;
@@ -13,6 +14,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Leader-Worker 智能体团队。
@@ -57,6 +61,16 @@ public class AgentTeam {
 
     /** 团队进度跟踪器 */
     private final TeamProgressTracker progressTracker;
+
+    /** 用于并行 worker 调度的有界线程池（避免占用公共 ForkJoinPool 阻塞 LLM 调用） */
+    private final ExecutorService workerExecutor = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "agent-team-worker");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /** 团队共享知识库（可选） */
+    private SharedKnowledgeBase knowledgeBase;
 
     /**
      * 构造智能体团队。
@@ -111,6 +125,10 @@ public class AgentTeam {
 
     /**
      * 创建并注册一个工作者智能体。
+     * <p>
+     * 工作者使用独立的 MCPClient，不包含团队管理工具，
+     * 防止工作者误操作团队管理功能（如 team_dissolve）。
+     * </p>
      *
      * @param name         工作者名称
      * @param systemPrompt 工作者系统提示词
@@ -126,11 +144,19 @@ public class AgentTeam {
             return workers.get(name);
         }
 
+        // 为工作者创建独立的 MCPClient，不包含团队管理工具
+        MCPClient workerMcpClient = new MCPClient();
+        workerMcpClient.initialize();
+        
+        // 从领导者的 MCPClient 复制工具，排除团队管理工具
+        Set<String> teamTools = Set.of("agent_create", "agent_message", "agent_list", "team_dissolve", "agent_message_parallel");
+        mcpClient.copyToolsTo(workerMcpClient, teamTools);
+
         Agent worker = new Agent(
                 name,
                 systemPrompt,
                 chatModel,
-                mcpClient,
+                workerMcpClient,  // 使用独立的 MCPClient
                 credentialProvider,
                 permissionEngine,
                 workspaceManager,
@@ -138,7 +164,7 @@ public class AgentTeam {
         );
 
         workers.put(name, worker);
-        log.info("团队 [{}] 创建工作者: name={}, id={}", teamId, name, worker.getId());
+        log.info("团队 [{}] 创建工作者: name={}, id={} (独立MCPClient)", teamId, name, worker.getId());
 
         // 进度跟踪：创建工作者
         progressTracker.onLeaderCreateWorker(name, "工作者");
@@ -172,7 +198,72 @@ public class AgentTeam {
         long duration = System.currentTimeMillis() - startTime;
         progressTracker.onWorkerComplete(workerName, true, duration);
 
+        // 自动保存工作者知识到共享知识库
+        if (knowledgeBase != null) {
+            String replyText = reply.getTextContent();
+            if (replyText != null && !replyText.isEmpty()) {
+                // 提取关键发现（简单策略：取前200字符作为摘要）
+                String summary = replyText.length() > 200 ? replyText.substring(0, 200) + "..." : replyText;
+                List<String> tags = List.of(workerName, "task_result");
+                knowledgeBase.add(workerName, summary, tags, 0.8);
+                log.debug("工作者 [{}] 知识已保存到共享知识库", workerName);
+            }
+        }
+
         return reply;
+    }
+
+    /**
+     * 并行向多个工作者发送消息并收集回复。
+     * <p>
+     * 使用 CompletableFuture 实现并行执行，所有工作者同时开始工作，
+     * 显著减少总耗时。
+     * </p>
+     *
+     * @param tasks 任务映射，key 为工作者名称，value 为消息内容
+     * @return 结果映射，key 为工作者名称，value 为回复消息
+     */
+    public Map<String, Msg> sendMessageToWorkersParallel(Map<String, String> tasks) {
+        if (!active) {
+            throw new IllegalStateException("团队已解散，无法执行任务");
+        }
+
+        log.info("团队 [{}] 开始并行执行 {} 个任务", teamId, tasks.size());
+        long startTime = System.currentTimeMillis();
+
+        // 创建 CompletableFuture 列表
+        List<CompletableFuture<Map.Entry<String, Msg>>> futures = new ArrayList<>();
+
+        for (Map.Entry<String, String> task : tasks.entrySet()) {
+            String workerName = task.getKey();
+            String message = task.getValue();
+
+            CompletableFuture<Map.Entry<String, Msg>> future =
+                CompletableFuture.supplyAsync(() -> {
+                    Msg reply = sendMessageToWorker(workerName, message);
+                    return Map.entry(workerName, reply);
+                }, workerExecutor);
+            futures.add(future);
+        }
+
+        // 等待所有任务完成
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+        // 收集结果
+        Map<String, Msg> results = new LinkedHashMap<>();
+        for (CompletableFuture<Map.Entry<String, Msg>> future : futures) {
+            try {
+                Map.Entry<String, Msg> entry = future.get();
+                results.put(entry.getKey(), entry.getValue());
+            } catch (Exception e) {
+                log.error("并行任务执行失败", e);
+            }
+        }
+
+        long duration = System.currentTimeMillis() - startTime;
+        log.info("团队 [{}] 并行任务完成，耗时 {}ms", teamId, duration);
+
+        return results;
     }
 
     /**
@@ -190,6 +281,7 @@ public class AgentTeam {
         }
         workers.clear();
         active = false;
+        workerExecutor.shutdownNow();
         log.info("团队 [{}] 已解散", teamId);
     }
 
@@ -275,9 +367,39 @@ public class AgentTeam {
                     return "团队已解散，关闭了 " + count + " 个工作者";
                 });
 
+        // agent_message_parallel: 并行向多个工作者发送消息
+        String agentMessageParallelParams = """
+                {"type":"object","properties":{"tasks":{"type":"object","description":"任务映射，key为工作者名称，value为消息内容","additionalProperties":{"type":"string"}}},"required":["tasks"]}""";
+        mcpClient.registerCustomTool("agent_message_parallel",
+                "并行向多个工作者发送消息，所有工作者同时开始工作，显著减少总耗时",
+                agentMessageParallelParams,
+                (args) -> {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> tasksObj = (Map<String, Object>) args.getOrDefault("tasks", Map.of());
+                    Map<String, String> tasks = new LinkedHashMap<>();
+                    for (Map.Entry<String, Object> entry : tasksObj.entrySet()) {
+                        tasks.put(entry.getKey(), String.valueOf(entry.getValue()));
+                    }
+                    
+                    Map<String, Msg> results = sendMessageToWorkersParallel(tasks);
+                    
+                    // 格式化结果
+                    StringBuilder sb = new StringBuilder("并行任务执行结果:\n\n");
+                    for (Map.Entry<String, Msg> entry : results.entrySet()) {
+                        sb.append("【").append(entry.getKey()).append("】\n");
+                        for (ContentBlock block : entry.getValue().getContent()) {
+                            if (block instanceof ContentBlock.TextBlock textBlock) {
+                                sb.append(textBlock.getText());
+                            }
+                        }
+                        sb.append("\n\n");
+                    }
+                    return sb.toString().trim();
+                });
+
         // 将团队工具描述注入领导者系统提示词
         leader.appendToSystemPrompt(getTeamToolsDescription());
-        log.info("团队 [{}] 已注册 4 个团队工具并更新领导者提示词", teamId);
+        log.info("团队 [{}] 已注册 5 个团队工具并更新领导者提示词", teamId);
     }
 
     // ==================== 团队工具描述 ====================
@@ -363,5 +485,20 @@ public class AgentTeam {
 
     public TeamProgressTracker getProgressTracker() {
         return progressTracker;
+    }
+
+    /**
+     * 设置团队共享知识库。
+     */
+    public void setKnowledgeBase(SharedKnowledgeBase knowledgeBase) {
+        this.knowledgeBase = knowledgeBase;
+        log.info("团队 [{}] 已启用共享知识库", teamId);
+    }
+
+    /**
+     * 获取团队共享知识库。
+     */
+    public SharedKnowledgeBase getKnowledgeBase() {
+        return knowledgeBase;
     }
 }

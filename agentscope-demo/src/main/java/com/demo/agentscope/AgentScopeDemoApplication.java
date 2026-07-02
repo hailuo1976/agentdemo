@@ -2,6 +2,8 @@ package com.demo.agentscope;
 
 import com.demo.agentscope.agent.Agent;
 import com.demo.agentscope.agent.AgentTeam;
+import com.demo.agentscope.cache.IntermediateResultManager;
+import com.demo.agentscope.context.ContextManager;
 import com.demo.agentscope.credential.CredentialProvider;
 import com.demo.agentscope.credential.DefaultCredentialProvider;
 import com.demo.agentscope.execution.CodeExecutionManager;
@@ -10,6 +12,8 @@ import com.demo.agentscope.filepermission.FilePermissionManager;
 import com.demo.agentscope.filepermission.SecureFileWorkspace;
 import com.demo.agentscope.mcp.MCPClient;
 import com.demo.agentscope.mcp.MCPConfig;
+import com.demo.agentscope.memory.LongTermMemory;
+import com.demo.agentscope.memory.ShortTermMemory;
 import com.demo.agentscope.message.Msg;
 import com.demo.agentscope.middleware.ContextCompressionMiddleware;
 import com.demo.agentscope.middleware.MiddlewareChain;
@@ -29,6 +33,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.*;
 
 /**
@@ -104,6 +109,13 @@ public class AgentScopeDemoApplication {
                     secureFileWorkspace.getPermissionManager().getBaseDir());
             mcpClient.registerCodeExecutionTools(executionManager);
 
+            // 4.3 创建中间结果管理器并注册缓存工具
+            Path workspaceDir = secureFileWorkspace.getPermissionManager().getBaseDir();
+            IntermediateResultManager cacheManager = new IntermediateResultManager(
+                    workspaceDir.resolve("cache/intermediate"),
+                    Duration.ofHours(24));
+            mcpClient.registerCacheTools(cacheManager);
+
             // 5. 创建权限引擎，配置默认规则
             PermissionEngine permissionEngine = createPermissionEngine();
 
@@ -124,6 +136,24 @@ public class AgentScopeDemoApplication {
                     workspaceManager,
                     primaryProvider
             );
+
+            // 8.1 创建短期记忆管理器
+            ShortTermMemory shortTermMemory = new ShortTermMemory(
+                    workspaceDir.resolve("memory/short_term"),
+                    1000,  // 最大记忆条目数
+                    Duration.ofDays(7)  // 保留7天
+            );
+
+            // 8.2 创建长期记忆管理器
+            LongTermMemory longTermMemory = new LongTermMemory(
+                    workspaceDir.resolve("memory/long_term"),
+                    5000  // 最大记忆条目数
+            );
+
+            // 8.3 创建智能上下文管理器并集成到智能体
+            ContextManager contextManager = new ContextManager(shortTermMemory, SYSTEM_PROMPT);
+            contextManager.setLongTermMemory(longTermMemory);
+            agent.setContextManager(contextManager);
 
             // 挂载中间件链
             MiddlewareChain chain = agent.getMiddlewareChain();

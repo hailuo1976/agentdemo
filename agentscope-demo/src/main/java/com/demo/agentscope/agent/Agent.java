@@ -73,6 +73,9 @@ public class Agent {
     /** 对话上下文（消息历史） */
     private final List<Msg> context;
 
+    /** 智能上下文管理器（可选） */
+    private com.demo.agentscope.context.ContextManager contextManager;
+
     /** 智能体状态（等价于 AgentState） */
     private final Map<String, Object> agentState;
 
@@ -369,6 +372,13 @@ public class Agent {
      * 构建发送给模型的消息列表（包含系统提示词和上下文历史）。
      */
     private List<Msg> buildMessages() {
+        // 如果启用了智能上下文管理器，使用它来构建上下文
+        if (contextManager != null) {
+            String lastUserQuery = getLastUserQuery();
+            return contextManager.buildContext(lastUserQuery, context);
+        }
+
+        // 否则使用简单的上下文构建方式
         List<Msg> messages = new ArrayList<>();
 
         // 系统提示词
@@ -381,6 +391,19 @@ public class Agent {
         // 对话历史
         messages.addAll(context);
         return messages;
+    }
+
+    /**
+     * 获取最后一条用户消息。
+     */
+    private String getLastUserQuery() {
+        for (int i = context.size() - 1; i >= 0; i--) {
+            Msg msg = context.get(i);
+            if ("user".equals(msg.getRole())) {
+                return msg.getTextContent();
+            }
+        }
+        return null;
     }
 
     /**
@@ -539,5 +562,20 @@ public class Agent {
 
     public void setMaxIterations(int maxIterations) {
         this.maxIterations = maxIterations;
+    }
+
+    /**
+     * 设置智能上下文管理器。
+     */
+    public void setContextManager(com.demo.agentscope.context.ContextManager contextManager) {
+        this.contextManager = contextManager;
+        log.info("智能体 [{}] 已启用智能上下文管理器", name);
+    }
+
+    /**
+     * 获取智能上下文管理器。
+     */
+    public com.demo.agentscope.context.ContextManager getContextManager() {
+        return contextManager;
     }
 }

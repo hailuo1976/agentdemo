@@ -3,6 +3,7 @@ package com.demo.agentscope.mcp;
 import com.demo.agentscope.execution.CodeExecutionManager;
 import com.demo.agentscope.filepermission.SecureFileWorkspace;
 import com.demo.agentscope.message.ContentBlock;
+import com.demo.agentscope.tool.ToolResultSummarizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,12 +38,16 @@ public class MCPClient {
     /** 初始化状态 */
     private volatile boolean initialized;
 
+    /** 工具结果摘要器 */
+    private final ToolResultSummarizer resultSummarizer;
+
     public MCPClient() {
         this.configs = new ArrayList<>();
         this.connections = new ConcurrentHashMap<>();
         this.builtinTools = new LinkedHashMap<>();
         this.allToolInfos = new ArrayList<>();
         this.initialized = false;
+        this.resultSummarizer = new ToolResultSummarizer();
     }
 
     // ==================== 初始化 ====================
@@ -219,6 +224,57 @@ public class MCPClient {
     }
 
     /**
+     * 注册中间结果缓存工具：save_result、load_result、list_results。
+     * <p>
+     * 支持跨会话复用计算结果，减少重复计算。
+     * </p>
+     *
+     * @param cacheManager 中间结果管理器
+     */
+    public void registerCacheTools(com.demo.agentscope.cache.IntermediateResultManager cacheManager) {
+        Objects.requireNonNull(cacheManager, "缓存管理器不能为null");
+
+        String saveParams = """
+                {"type":"object","properties":{"key":{"type":"string","description":"结果键名，用于标识和后续加载"},"value":{"type":"string","description":"要保存的结果内容"}},"required":["key","value"]}""";
+        registerBuiltin("save_result", "保存中间结果到缓存，支持跨会话复用", saveParams, (args) -> {
+            String key = String.valueOf(args.getOrDefault("key", ""));
+            String value = String.valueOf(args.getOrDefault("value", ""));
+            if (key.isEmpty()) {
+                return "错误: key 不能为空";
+            }
+            cacheManager.save(key, value);
+            return "结果已保存: " + key;
+        });
+
+        String loadParams = """
+                {"type":"object","properties":{"key":{"type":"string","description":"要加载的结果键名"}},"required":["key"]}""";
+        registerBuiltin("load_result", "从缓存加载历史中间结果", loadParams, (args) -> {
+            String key = String.valueOf(args.getOrDefault("key", ""));
+            if (key.isEmpty()) {
+                return "错误: key 不能为空";
+            }
+            Optional<Object> result = cacheManager.load(key);
+            if (result.isPresent()) {
+                return String.valueOf(result.get());
+            } else {
+                return "未找到结果: " + key;
+            }
+        });
+
+        String listParams = """
+                {"type":"object","properties":{},"required":[]}""";
+        registerBuiltin("list_results", "列出所有可用的缓存结果", listParams, (args) -> {
+            List<String> keys = cacheManager.list();
+            if (keys.isEmpty()) {
+                return "当前没有缓存结果";
+            }
+            return "可用结果列表:\n" + String.join("\n", keys);
+        });
+
+        log.info("已注册 3 个缓存工具（save_result/load_result/list_results）");
+    }
+
+    /**
      * 连接到所有已配置的 MCP 服务器。
      */
     private void connectToConfiguredServers() {
@@ -266,8 +322,11 @@ public class MCPClient {
             BuiltinToolEntry builtin = builtinTools.get(toolName);
             if (builtin != null) {
                 String output = builtin.executor().execute(args);
-                log.debug("内置工具 [{}] 执行成功", toolName);
-                return new ToolResult(true, output, null);
+                // 对大结果进行摘要
+                String summarizedOutput = resultSummarizer.summarize(toolName, output);
+                log.debug("内置工具 [{}] 执行成功，原始长度: {}, 摘要长度: {}", 
+                    toolName, output.length(), summarizedOutput.length());
+                return new ToolResult(true, summarizedOutput, null);
             }
 
             // 再查外部服务器工具
@@ -276,7 +335,9 @@ public class MCPClient {
                 McpServerConnection connection = connections.get(serverName);
                 if (connection != null && connection.isConnected()) {
                     String result = connection.callTool(toolName, args);
-                    return new ToolResult(true, result, null);
+                    // 对大结果进行摘要
+                    String summarizedResult = resultSummarizer.summarize(toolName, result);
+                    return new ToolResult(true, summarizedResult, null);
                 }
                 return new ToolResult(false, null, "MCP 服务器未连接: " + serverName);
             }
@@ -344,6 +405,41 @@ public class MCPClient {
 
     public boolean isInitialized() {
         return initialized;
+    }
+
+    /**
+     * 复制工具到目标 MCPClient（排除指定工具）。
+     * <p>
+     * 用于为工作者创建独立的 MCPClient，复制领导者的文件工具和代码执行工具，
+     * 但排除团队管理工具（agent_create, agent_message, agent_list, team_dissolve）。
+     * </p>
+     *
+     * @param target        目标 MCPClient
+     * @param excludeTools  要排除的工具名称集合
+     */
+    public void copyToolsTo(MCPClient target, Set<String> excludeTools) {
+        log.info("复制工具到目标 MCPClient，排除: {}", excludeTools);
+
+        // 构建 builtin 工具名 → parametersJson 的索引，避免 O(n²) 扫描
+        Map<String, String> paramsByTool = new HashMap<>();
+        for (ToolInfo info : allToolInfos) {
+            if ("builtin".equals(info.server())) {
+                paramsByTool.put(info.name(), info.parametersJson());
+            }
+        }
+
+        int copied = 0;
+        for (Map.Entry<String, BuiltinToolEntry> entry : builtinTools.entrySet()) {
+            String toolName = entry.getKey();
+            if (!excludeTools.contains(toolName)) {
+                BuiltinToolEntry toolEntry = entry.getValue();
+                String parametersJson = paramsByTool.getOrDefault(toolName, "");
+                target.registerCustomTool(toolName, toolEntry.description(), parametersJson, toolEntry.executor());
+                copied++;
+            }
+        }
+
+        log.info("工具复制完成：复制 {} 个，目标 MCPClient 现有 {} 个工具", copied, target.listTools().size());
     }
 
     // ==================== 内部类型 ====================
