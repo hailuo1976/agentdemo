@@ -20,8 +20,7 @@ import java.time.temporal.ChronoUnit;
  *   <li>{@code fetchQuote} 改用 {@code ts.pro_bar(adj='qfq')} 拿前复权价,
  *       而非 {@code pro.daily()}(未复权,与 akshare 不可比)。</li>
  *   <li>{@code convertToTuShareCode} 修正边界:6/9 → .SH,0/3 → .SZ。</li>
- *   <li>所有调用经 {@link RetryHelper} 重试;tushare 错误经
- *       {@link #classifyError(String)} 分类(对齐 Python {@code classify_tushare_error})。</li>
+ *   <li>tushare 错误经 {@link #classifyError(String)} 分类。</li>
  * </ul>
  */
 public class TuShareDataSource implements StockDataSource {
@@ -48,7 +47,7 @@ public class TuShareDataSource implements StockDataSource {
 
     @Override
     public CachedStockEntry.QuoteData fetchQuote(String code) throws DataSourceException {
-        validateCode(code);
+        StockDataUtils.validateCode(code);
         String tsCode = convertToTuShareCode(code);
         String today = LocalDate.now().toString().replace("-", "");
         String startOffset = LocalDate.now().minus(10, ChronoUnit.DAYS).toString().replace("-", "");
@@ -59,7 +58,8 @@ public class TuShareDataSource implements StockDataSource {
             if (!result.isSuccess()) {
                 throw classifyError("tushare 执行失败: " + result.getStderr());
             }
-            JsonNode node = parseJson(result.getStdout());
+            JsonNode node = StockDataUtils.parseStdoutJson(objectMapper, log,
+                    result.getStdout(), "tushare");
             if (node == null) {
                 throw new DataSourceException(DataSourceException.Type.UNKNOWN,
                         "tushare 无 JSON 输出");
@@ -67,13 +67,13 @@ public class TuShareDataSource implements StockDataSource {
             if (node.has("error")) {
                 throw classifyError(node.path("error").asText());
             }
-            return buildQuote(node);
+            return StockDataUtils.buildQuote(node, getName());
         }, "tushare.fetchQuote");
     }
 
     @Override
     public CachedStockEntry.FundamentalData fetchFundamental(String code) throws DataSourceException {
-        validateCode(code);
+        StockDataUtils.validateCode(code);
         String tsCode = convertToTuShareCode(code);
         String pythonCode = FUNDAMENTAL_SCRIPT.formatted(tsCode);
 
@@ -82,7 +82,8 @@ public class TuShareDataSource implements StockDataSource {
             if (!result.isSuccess()) {
                 throw classifyError("tushare 执行失败: " + result.getStderr());
             }
-            JsonNode node = parseJson(result.getStdout());
+            JsonNode node = StockDataUtils.parseStdoutJson(objectMapper, log,
+                    result.getStdout(), "tushare");
             if (node == null) {
                 throw new DataSourceException(DataSourceException.Type.UNKNOWN,
                         "tushare 无 JSON 输出");
@@ -90,7 +91,7 @@ public class TuShareDataSource implements StockDataSource {
             if (node.has("error")) {
                 throw classifyError(node.path("error").asText());
             }
-            return buildFundamental(node);
+            return StockDataUtils.buildFundamental(node, getName());
         }, "tushare.fetchFundamental");
     }
 
@@ -112,20 +113,13 @@ public class TuShareDataSource implements StockDataSource {
             availabilityCache = false;
             return false;
         }
-        String checkCode = "import tushare; print('ok')";
-        CodeExecutionManager.ExecutionResult result = executionManager.executePython(checkCode);
-        boolean ok = result.isSuccess();
-        availabilityCache = ok;
-        return ok;
+        CodeExecutionManager.ExecutionResult result =
+                executionManager.executePython("import tushare; print('ok')");
+        availabilityCache = result.isSuccess();
+        return availabilityCache;
     }
 
     // ==================== 内部工具 ====================
-
-    private static void validateCode(String code) throws DataSourceException {
-        if (code == null || !code.matches("\\d{6}")) {
-            throw new DataSourceException("非法股票代码: " + code);
-        }
-    }
 
     /**
      * 股票代码 → tushare ts_code。
@@ -133,7 +127,6 @@ public class TuShareDataSource implements StockDataSource {
      *   <li>6/9 开头 → .SH(上交所,9 开头是 B 股)</li>
      *   <li>0/3 开头 → .SZ(深交所,3 开头是创业板)</li>
      * </ul>
-     * 对齐 Python fetchers.py:_to_ts_code。
      */
     private static String convertToTuShareCode(String code) {
         char first = code.charAt(0);
@@ -142,80 +135,34 @@ public class TuShareDataSource implements StockDataSource {
 
     /**
      * 把 tushare 的混合错误信息归类到我们的错误类型。
-     * 对齐 Python errors.py:classify_tushare_error。
      */
     private static DataSourceException classifyError(String message) {
         if (message == null) {
             return new DataSourceException(DataSourceException.Type.UNKNOWN, "tushare 未知错误");
         }
         String lower = message.toLowerCase();
-        // 频次/限流
         if (lower.contains("5000") || lower.contains("5001") || lower.contains("5002")
                 || lower.contains("频次") || lower.contains("rate") || lower.contains("limit")) {
             return new DataSourceException(DataSourceException.Type.RATE_LIMIT, message);
         }
-        // 权限
         if (lower.contains("40001") || lower.contains("40002") || lower.contains("权限")
                 || lower.contains("permission")) {
             return new DataSourceException(DataSourceException.Type.PERMISSION, message);
         }
-        // 网络/连接
         if (lower.contains("connection") || lower.contains("timeout") || lower.contains("网络")
                 || lower.contains("remote")) {
             return new DataSourceException(DataSourceException.Type.NETWORK, message);
         }
-        // 无数据(接口正常返回但空)
         if (lower.contains("无数据") || lower.contains("empty") || lower.contains("no rows")) {
             return new DataSourceException(DataSourceException.Type.DATA_UNAVAILABLE, message);
         }
         return new DataSourceException(DataSourceException.Type.UNKNOWN, message);
     }
 
-    private JsonNode parseJson(String stdout) {
-        try {
-            return objectMapper.readTree(stdout);
-        } catch (Exception e) {
-            log.warn("tushare JSON 解析失败: {}", stdout);
-            return null;
-        }
-    }
-
-    private CachedStockEntry.QuoteData buildQuote(JsonNode node) throws DataSourceException {
-        try {
-            CachedStockEntry.QuoteData q = new CachedStockEntry.QuoteData();
-            q.setPrice(node.get("price").asDouble());
-            q.setChangePct(node.get("change_pct").asDouble());
-            q.setVolume(node.get("volume").asLong());
-            q.setUpdatedAt(Instant.parse(node.get("updated_at").asText()));
-            q.setDataSource("tushare");
-            return q;
-        } catch (Exception e) {
-            throw new DataSourceException(DataSourceException.Type.UNKNOWN,
-                    "解析行情数据失败", e);
-        }
-    }
-
-    private CachedStockEntry.FundamentalData buildFundamental(JsonNode node) throws DataSourceException {
-        try {
-            CachedStockEntry.FundamentalData f = new CachedStockEntry.FundamentalData();
-            f.setPeTtm(node.get("pe_ttm").asDouble());
-            f.setPb(node.get("pb").asDouble());
-            f.setRoe(node.get("roe").asDouble());
-            f.setMarketCap(node.get("market_cap").asDouble());
-            f.setUpdatedAt(Instant.parse(node.get("updated_at").asText()));
-            f.setDataSource("tushare");
-            return f;
-        } catch (Exception e) {
-            throw new DataSourceException(DataSourceException.Type.UNKNOWN,
-                    "解析基本面数据失败", e);
-        }
-    }
-
     // ==================== Python 脚本模板 ====================
 
     /**
-     * pro_bar(adj='qfq') 拿前复权日线。免费版 adj_factor 限 1次/小时,
-     * 重试也无济于事 —— 但仍加重试以应对偶发网络抖动。
+     * pro_bar(adj='qfq') 拿前复权日线。
      */
     private static final String QUOTE_SCRIPT = """
             import os, sys, json

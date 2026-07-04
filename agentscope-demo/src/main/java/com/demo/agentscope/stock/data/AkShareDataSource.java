@@ -16,11 +16,9 @@ import java.time.Instant;
  * <p>对齐 Python stocktools/fetchers.py:
  * <ul>
  *   <li>{@code fetchQuote} 用单股历史接口 {@code stock_zh_a_hist}(Eastmoney qfq) +
- *       {@code stock_zh_a_daily}(Sina qfq) 双源兜底,不再扫描全市场。</li>
- *   <li>{@code fetchFundamental} 用 {@code stock_individual_info_em} 拿单股市值,
- *       不再调用 {@code stock_zh_a_spot_em}。</li>
- *   <li>所有调用经 {@link RetryHelper} 重试(等价 {@code @retry_on_network})。</li>
- *   <li>入口校验 code 仅含 6 位数字,防字符串注入。</li>
+ *       {@code stock_zh_a_daily}(Sina qfq) 双源兜底。</li>
+ *   <li>{@code fetchFundamental} 用 {@code stock_individual_info_em} 拿单股市值。</li>
+ *   <li>所有调用经 {@link RetryHelper} 重试。</li>
  * </ul>
  */
 public class AkShareDataSource implements StockDataSource {
@@ -45,31 +43,30 @@ public class AkShareDataSource implements StockDataSource {
 
     @Override
     public CachedStockEntry.QuoteData fetchQuote(String code) throws DataSourceException {
-        validateCode(code);
+        StockDataUtils.validateCode(code);
 
         String pythonCode = QUOTE_SCRIPT.formatted(code);
 
         return RetryHelper.retry(() -> {
             CodeExecutionManager.ExecutionResult result = executionManager.executePython(pythonCode);
             if (!result.isSuccess()) {
-                // Python 执行失败、连接中断等 → 可重试
                 throw new DataSourceException(DataSourceException.Type.NETWORK,
                         "akshare 执行失败: " + result.getStderr());
             }
-            JsonNode node = parseJson(result.getStdout());
+            JsonNode node = StockDataUtils.parseStdoutJson(objectMapper, log,
+                    result.getStdout(), "akshare");
             if (node == null || node.has("error")) {
                 String msg = node != null ? node.path("error").asText() : "无 JSON 输出";
-                // akshare 两个端点都失败 → 网络/源站问题,可重试
                 throw new DataSourceException(DataSourceException.Type.NETWORK,
                         "akshare 行情获取失败: " + msg);
             }
-            return buildQuote(node);
+            return StockDataUtils.buildQuote(node, getName());
         }, "akshare.fetchQuote");
     }
 
     @Override
     public CachedStockEntry.FundamentalData fetchFundamental(String code) throws DataSourceException {
-        validateCode(code);
+        StockDataUtils.validateCode(code);
 
         String pythonCode = FUNDAMENTAL_SCRIPT.formatted(code);
 
@@ -79,14 +76,14 @@ public class AkShareDataSource implements StockDataSource {
                 throw new DataSourceException(DataSourceException.Type.NETWORK,
                         "akshare 执行失败: " + result.getStderr());
             }
-            JsonNode node = parseJson(result.getStdout());
+            JsonNode node = StockDataUtils.parseStdoutJson(objectMapper, log,
+                    result.getStdout(), "akshare");
             if (node == null || node.has("error")) {
                 String msg = node != null ? node.path("error").asText() : "无 JSON 输出";
-                // 接口正常但取不到数据 → 不重试
                 throw new DataSourceException(DataSourceException.Type.DATA_UNAVAILABLE,
                         "akshare 基本面获取失败: " + msg);
             }
-            return buildFundamental(node);
+            return StockDataUtils.buildFundamental(node, getName());
         }, "akshare.fetchFundamental");
     }
 
@@ -105,66 +102,17 @@ public class AkShareDataSource implements StockDataSource {
         if (availabilityCache != null) {
             return availabilityCache;
         }
-        String checkCode = "import akshare; print('ok')";
-        CodeExecutionManager.ExecutionResult result = executionManager.executePython(checkCode);
-        boolean ok = result.isSuccess();
-        availabilityCache = ok;
-        return ok;
-    }
-
-    // ==================== 内部工具 ====================
-
-    private static void validateCode(String code) throws DataSourceException {
-        if (code == null || !code.matches("\\d{6}")) {
-            throw new DataSourceException("非法股票代码: " + code);
-        }
-    }
-
-    private JsonNode parseJson(String stdout) {
-        try {
-            return objectMapper.readTree(stdout);
-        } catch (Exception e) {
-            log.warn("akshare JSON 解析失败: {}", stdout);
-            return null;
-        }
-    }
-
-    private CachedStockEntry.QuoteData buildQuote(JsonNode node) throws DataSourceException {
-        try {
-            CachedStockEntry.QuoteData q = new CachedStockEntry.QuoteData();
-            q.setPrice(node.get("price").asDouble());
-            q.setChangePct(node.get("change_pct").asDouble());
-            q.setVolume(node.get("volume").asLong());
-            q.setUpdatedAt(Instant.parse(node.get("updated_at").asText()));
-            q.setDataSource("akshare");
-            return q;
-        } catch (Exception e) {
-            throw new DataSourceException(DataSourceException.Type.UNKNOWN,
-                    "解析行情数据失败", e);
-        }
-    }
-
-    private CachedStockEntry.FundamentalData buildFundamental(JsonNode node) throws DataSourceException {
-        try {
-            CachedStockEntry.FundamentalData f = new CachedStockEntry.FundamentalData();
-            f.setPeTtm(node.get("pe_ttm").asDouble());
-            f.setPb(node.get("pb").asDouble());
-            f.setRoe(node.get("roe").asDouble());
-            f.setMarketCap(node.get("market_cap").asDouble());
-            f.setUpdatedAt(Instant.parse(node.get("updated_at").asText()));
-            f.setDataSource("akshare");
-            return f;
-        } catch (Exception e) {
-            throw new DataSourceException(DataSourceException.Type.UNKNOWN,
-                    "解析基本面数据失败", e);
-        }
+        CodeExecutionManager.ExecutionResult result =
+                executionManager.executePython("import akshare; print('ok')");
+        availabilityCache = result.isSuccess();
+        return availabilityCache;
     }
 
     // ==================== Python 脚本模板 ====================
 
     /**
      * 行情:Eastmoney 单股历史 qfq 优先 → Sina 单股 qfq 兜底。
-     * 取近 10 个交易日(够算最新价/涨跌幅/成交量),不再扫全市场。
+     * 取近 10 个交易日(够算最新价/涨跌幅/成交量)。
      */
     private static final String QUOTE_SCRIPT = """
             import akshare as ak
@@ -221,7 +169,7 @@ public class AkShareDataSource implements StockDataSource {
 
     /**
      * 基本面:PE/PB 用 stock_a_indicator_lg,ROE 用 stock_financial_analysis_indicator,
-     * 总市值用单股定点 stock_individual_info_em(不再扫全市场)。
+     * 总市值用单股定点 stock_individual_info_em。
      */
     private static final String FUNDAMENTAL_SCRIPT = """
             import akshare as ak
@@ -257,7 +205,7 @@ public class AkShareDataSource implements StockDataSource {
                 row = df_info[df_info["item"] == "总市值"]
                 if not row.empty:
                     market_cap = float(row.iloc[0]["value"]) / 1e8  # 转亿元
-            except Exception as e:
+            except Exception:
                 pass
 
             if pe_ttm is None and pb is None and roe is None and market_cap is None:

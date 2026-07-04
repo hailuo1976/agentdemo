@@ -46,6 +46,23 @@ public class RetryHelperTest {
     }
 
     @Test
+    void rateLimitError_isRetriable() throws DataSourceException {
+        AtomicInteger calls = new AtomicInteger(0);
+        Retryable<String> action = () -> {
+            int n = calls.incrementAndGet();
+            if (n < 2) {
+                throw new DataSourceException(DataSourceException.Type.RATE_LIMIT,
+                        "模拟限频 #" + n);
+            }
+            return "ok";
+        };
+
+        String result = RetryHelper.retry(action, "test.ratelimit");
+        assertEquals("ok", result);
+        assertEquals(2, calls.get(), "RATE_LIMIT 应可重试");
+    }
+
+    @Test
     void allNetworkFails_throwsAfterMaxAttempts() {
         AtomicInteger calls = new AtomicInteger(0);
         Retryable<String> action = () -> {
