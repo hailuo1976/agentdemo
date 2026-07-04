@@ -31,11 +31,17 @@ public class FilePermissionConfig {
         DENY_ALL
     }
 
-    /** 允许读取的路径模式列表 */
+    /** 允许读取的路径模式列表（相对路径） */
     private final List<PathPattern> allowedReadPaths;
 
-    /** 允许写入的路径模式列表 */
+    /** 允许写入的路径模式列表（相对路径） */
     private final List<PathPattern> allowedWritePaths;
+
+    /** 允许读取的绝对路径模式列表 */
+    private final List<PathPattern> allowedAbsoluteReadPaths;
+
+    /** 允许写入的绝对路径模式列表 */
+    private final List<PathPattern> allowedAbsoluteWritePaths;
 
     /** 禁止访问的路径模式列表（黑名单，优先级最高） */
     private final List<PathPattern> deniedPaths;
@@ -55,6 +61,8 @@ public class FilePermissionConfig {
     private FilePermissionConfig(Builder builder) {
         this.allowedReadPaths = new ArrayList<>(builder.allowedReadPaths);
         this.allowedWritePaths = new ArrayList<>(builder.allowedWritePaths);
+        this.allowedAbsoluteReadPaths = new ArrayList<>(builder.allowedAbsoluteReadPaths);
+        this.allowedAbsoluteWritePaths = new ArrayList<>(builder.allowedAbsoluteWritePaths);
         this.deniedPaths = new ArrayList<>(builder.deniedPaths);
         this.allowedExtensions = new HashSet<>(builder.allowedExtensions);
         this.deniedExtensions = new HashSet<>(builder.deniedExtensions);
@@ -68,6 +76,14 @@ public class FilePermissionConfig {
 
     public List<PathPattern> getAllowedWritePaths() {
         return List.copyOf(allowedWritePaths);
+    }
+
+    public List<PathPattern> getAllowedAbsoluteReadPaths() {
+        return List.copyOf(allowedAbsoluteReadPaths);
+    }
+
+    public List<PathPattern> getAllowedAbsoluteWritePaths() {
+        return List.copyOf(allowedAbsoluteWritePaths);
     }
 
     public List<PathPattern> getDeniedPaths() {
@@ -116,6 +132,8 @@ public class FilePermissionConfig {
     public static class Builder {
         private final List<PathPattern> allowedReadPaths = new ArrayList<>();
         private final List<PathPattern> allowedWritePaths = new ArrayList<>();
+        private final List<PathPattern> allowedAbsoluteReadPaths = new ArrayList<>();
+        private final List<PathPattern> allowedAbsoluteWritePaths = new ArrayList<>();
         private final List<PathPattern> deniedPaths = new ArrayList<>();
         private final Set<String> allowedExtensions = new HashSet<>();
         private final Set<String> deniedExtensions = new HashSet<>();
@@ -135,6 +153,22 @@ public class FilePermissionConfig {
         public Builder allowReadWrite(String pattern) {
             allowedReadPaths.add(new PathPattern(pattern));
             allowedWritePaths.add(new PathPattern(pattern));
+            return this;
+        }
+
+        public Builder allowAbsoluteRead(String absolutePath) {
+            allowedAbsoluteReadPaths.add(new PathPattern(absolutePath));
+            return this;
+        }
+
+        public Builder allowAbsoluteWrite(String absolutePath) {
+            allowedAbsoluteWritePaths.add(new PathPattern(absolutePath));
+            return this;
+        }
+
+        public Builder allowAbsoluteReadWrite(String absolutePath) {
+            allowedAbsoluteReadPaths.add(new PathPattern(absolutePath));
+            allowedAbsoluteWritePaths.add(new PathPattern(absolutePath));
             return this;
         }
 

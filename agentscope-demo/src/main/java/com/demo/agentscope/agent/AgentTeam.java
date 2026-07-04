@@ -7,6 +7,7 @@ import com.demo.agentscope.message.Msg;
 import com.demo.agentscope.model.ChatModel;
 import com.demo.agentscope.permission.PermissionEngine;
 import com.demo.agentscope.team.SharedKnowledgeBase;
+import com.demo.agentscope.team.TeamDissolutionPermissionService;
 import com.demo.agentscope.ui.TeamProgressTracker;
 import com.demo.agentscope.ui.VerbosityLevel;
 import com.demo.agentscope.workspace.WorkspaceManager;
@@ -72,6 +73,9 @@ public class AgentTeam {
     /** 团队共享知识库（可选） */
     private SharedKnowledgeBase knowledgeBase;
 
+    /** 团队解散权限控制服务 */
+    private final TeamDissolutionPermissionService dissolutionPermissionService;
+
     /**
      * 构造智能体团队。
      *
@@ -86,6 +90,26 @@ public class AgentTeam {
     public AgentTeam(Agent leader, ChatModel chatModel, MCPClient mcpClient,
                      CredentialProvider credentialProvider, PermissionEngine permissionEngine,
                      WorkspaceManager workspaceManager, String providerName) {
+        this(leader, chatModel, mcpClient, credentialProvider, permissionEngine,
+                workspaceManager, providerName, null);
+    }
+
+    /**
+     * 构造智能体团队（带解散权限控制）。
+     *
+     * @param leader                       领导者智能体
+     * @param chatModel                    聊天模型客户端
+     * @param mcpClient                    MCP 客户端
+     * @param credentialProvider           凭证提供者
+     * @param permissionEngine             权限引擎
+     * @param workspaceManager             工作空间管理器
+     * @param providerName                 提供商名称
+     * @param dissolutionPermissionService 团队解散权限控制服务（可选）
+     */
+    public AgentTeam(Agent leader, ChatModel chatModel, MCPClient mcpClient,
+                     CredentialProvider credentialProvider, PermissionEngine permissionEngine,
+                     WorkspaceManager workspaceManager, String providerName,
+                     TeamDissolutionPermissionService dissolutionPermissionService) {
         this.teamId = UUID.randomUUID().toString();
         this.leader = leader;
         this.workers = new LinkedHashMap<>();
@@ -97,6 +121,7 @@ public class AgentTeam {
         this.workspaceManager = workspaceManager;
         this.providerName = providerName;
         this.progressTracker = new TeamProgressTracker(teamId, leader.getName(), VerbosityLevel.fromEnv());
+        this.dissolutionPermissionService = dissolutionPermissionService;
 
         log.info("智能体团队已创建: teamId={}, leader={}", teamId, leader.getName());
     }
@@ -355,13 +380,27 @@ public class AgentTeam {
                     return sb.toString().trim();
                 });
 
-        // team_dissolve: 解散团队
+        // team_dissolve: 解散团队（受权限控制）
         String teamDissolveParams = """
-                {"type":"object","properties":{},"required":[]}""";
+                {"type":"object","properties":{"requester_id":{"type":"string","description":"请求解散团队的用户ID，用于权限验证"}},"required":["requester_id"]}""";
         mcpClient.registerCustomTool("team_dissolve",
-                "解散当前团队，关闭所有工作者",
+                "解散当前团队，关闭所有工作者。需要指定 requester_id 进行权限验证，团队成员不能解散自己所在的团队。",
                 teamDissolveParams,
                 (args) -> {
+                    String requesterId = String.valueOf(args.getOrDefault("requester_id", ""));
+                    if (requesterId.isBlank()) {
+                        return "错误: 必须提供 requester_id 参数以进行权限验证";
+                    }
+
+                    // 执行权限验证
+                    TeamDissolutionPermissionService.DissolutionPermissionResult result =
+                            checkDissolutionPermission(requesterId);
+
+                    if (!result.isAllowed()) {
+                        return "权限验证失败: " + result.getReason();
+                    }
+
+                    // 权限验证通过，执行解散
                     int count = workers.size();
                     dissolve();
                     return "团队已解散，关闭了 " + count + " 个工作者";
@@ -426,8 +465,9 @@ public class AgentTeam {
                 3. agent_list - 列出团队中所有工作者
                    参数: {}
 
-                4. team_dissolve - 解散当前团队，关闭所有工作者
-                   参数: {}
+                4. team_dissolve - 解散当前团队，关闭所有工作者（需权限验证）
+                   参数: {"requester_id": "请求者用户ID"}
+                   注意: 团队成员不能解散自己所在的团队，只有指定的外部管理员才能执行解散
 
                 当任务需要分工协作时，你应该：
                 - 用 agent_create 创建具有不同角色的工作者（如研究员、分析师、写作员）
@@ -463,6 +503,48 @@ public class AgentTeam {
         status.put("workers", workerInfo);
 
         return status;
+    }
+
+    // ==================== 权限控制 ====================
+
+    /**
+     * 检查解散权限。
+     * <p>
+     * 验证请求者是否有权解散团队。团队成员（包括领导者）不能解散自己所在的团队，
+     * 只有指定的外部用户才能发起解散请求。
+     * </p>
+     *
+     * @param requesterId 请求解散的用户ID
+     * @return 权限验证结果
+     */
+    public TeamDissolutionPermissionService.DissolutionPermissionResult checkDissolutionPermission(
+            String requesterId) {
+
+        // 如果没有配置权限服务，默认允许（向后兼容）
+        if (dissolutionPermissionService == null) {
+            log.warn("团队解散权限服务未配置，默认允许解散请求");
+            return TeamDissolutionPermissionService.DissolutionPermissionResult.allow();
+        }
+
+        // 收集团队成员ID（领导者 + 所有工作者）
+        Set<String> teamMemberIds = new HashSet<>();
+        teamMemberIds.add(leader.getId());
+        for (Agent worker : workers.values()) {
+            teamMemberIds.add(worker.getId());
+        }
+
+        // 委托给权限服务进行验证
+        return dissolutionPermissionService.checkDissolutionPermission(
+                requesterId, teamId, teamMemberIds);
+    }
+
+    /**
+     * 获取团队解散权限服务。
+     *
+     * @return 权限服务实例
+     */
+    public TeamDissolutionPermissionService getDissolutionPermissionService() {
+        return dissolutionPermissionService;
     }
 
     // ==================== Getter ====================

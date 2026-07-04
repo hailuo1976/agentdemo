@@ -27,6 +27,13 @@ import com.demo.agentscope.permission.PermissionMode;
 import com.demo.agentscope.permission.PermissionRule;
 import com.demo.agentscope.ui.ConsoleUI;
 import com.demo.agentscope.ui.VerbosityLevel;
+import com.demo.agentscope.stock.StockToolService;
+import com.demo.agentscope.stock.data.AkShareDataSource;
+import com.demo.agentscope.stock.data.StockDataService;
+import com.demo.agentscope.stock.data.TuShareDataSource;
+import com.demo.agentscope.stock.filter.StockFilterService;
+import com.demo.agentscope.stock.industry.IndustryService;
+import com.demo.agentscope.stock.scoring.LeaderScoringService;
 import com.demo.agentscope.workspace.LocalWorkspace;
 import com.demo.agentscope.workspace.WorkspaceManager;
 import org.slf4j.Logger;
@@ -71,12 +78,20 @@ public class AgentScopeDemoApplication {
             - execute_command: 执行 Shell 命令并返回结果（参数: command）
             - install_package: 通过 pip 安装 Python 第三方库（参数: package）
 
+            股票研究工具：
+            - list_industries: 列出申万行业分类树（参数: level, parent）
+            - select_industry_leaders: 按行业筛选龙头股（参数: industry, level, top_n, filters）
+            - get_stock_detail: 查询单只股票的完整指标（参数: code, force_refresh）
+            - update_stock_data: 刷新股票数据（参数: scope, code/industry, data_type, force）
+
             在回答问题时，如果需要获取实时信息或执行操作，请优先使用可用的工具。
             当用户要求读取或写入文件时，使用对应的文件工具。
             当需要计算、数据处理、网络请求或运行脚本时，使用 execute_python 执行代码并直接返回结果，不要只写代码让用户自己跑。
             当执行失败时，请分析错误原因，修正代码后重试。
             文件操作受权限管控，只能访问授权目录下的文件。
             代码执行受安全策略限制（禁止危险命令、30秒超时）。
+            股票数据来源于 akshare（主）+ tushare（备），带缓存机制（行情1h、基本面24h、行业排名7d）。
+            龙头评分基于市值、营收、ROE、品牌度多因子加权计算，行业内归一化到 0-100 分。
             回答时请保持简洁、准确，使用中文回复。
             """;
 
@@ -115,6 +130,28 @@ public class AgentScopeDemoApplication {
                     workspaceDir.resolve("cache/intermediate"),
                     Duration.ofHours(24));
             mcpClient.registerCacheTools(cacheManager);
+
+            // 4.4 创建股票服务并注册股票工具
+            IndustryService industryService = new IndustryService(executionManager,
+                    workspaceDir.resolve("cache"));
+            industryService.initialize();
+
+            AkShareDataSource akShareSource = new AkShareDataSource(executionManager);
+            TuShareDataSource tuShareSource = new TuShareDataSource(executionManager);
+            StockDataService stockDataService = new StockDataService(
+                    workspaceDir.resolve("cache/stocks"),
+                    List.of(akShareSource, tuShareSource),
+                    industryService);
+
+            LeaderScoringService scoringService = new LeaderScoringService();
+            StockFilterService filterService = new StockFilterService();
+
+            StockToolService stockToolService = new StockToolService(
+                    industryService,
+                    stockDataService,
+                    scoringService,
+                    filterService);
+            stockToolService.registerTools(mcpClient);
 
             // 5. 创建权限引擎，配置默认规则
             PermissionEngine permissionEngine = createPermissionEngine();
@@ -261,6 +298,7 @@ public class AgentScopeDemoApplication {
         // 配置文件权限策略
         FilePermissionConfig config = new FilePermissionConfig.Builder()
                 .allowReadWrite("**")
+                .allowAbsoluteRead("/tmp/**")
                 .denyPath("**/.env")
                 .denyPath("**/secrets/**")
                 .denyPath("**/.git/**")
@@ -321,6 +359,12 @@ public class AgentScopeDemoApplication {
         engine.addRule(new PermissionRule("agent_message", PermissionDecision.ALLOW, "向工作者发送消息"));
         engine.addRule(new PermissionRule("agent_list", PermissionDecision.ALLOW, "列出团队工作者"));
         engine.addRule(new PermissionRule("team_dissolve", PermissionDecision.ALLOW, "解散团队"));
+
+        // 允许股票工具
+        engine.addRule(new PermissionRule("list_industries", PermissionDecision.ALLOW, "行业分类查询"));
+        engine.addRule(new PermissionRule("select_industry_leaders", PermissionDecision.ALLOW, "龙头筛选"));
+        engine.addRule(new PermissionRule("get_stock_detail", PermissionDecision.ALLOW, "单股详情"));
+        engine.addRule(new PermissionRule("update_stock_data", PermissionDecision.ALLOW, "数据更新"));
 
         // 需要确认的工具
         engine.addRule(new PermissionRule("bash", PermissionDecision.ASK, "Shell 命令需人工确认"));

@@ -129,12 +129,24 @@ class AgentTeamTest {
         team.registerTeamTools();
         team.createWorker("temp", "临时工作者");
 
-        MCPClient.ToolResult result = mcpClient.executeTool("team_dissolve", java.util.Map.of());
+        MCPClient.ToolResult result = mcpClient.executeTool("team_dissolve",
+                java.util.Map.of("requester_id", "external_admin"));
 
         assertTrue(result.isSuccess());
         assertTrue(result.getOutput().contains("已解散"));
         assertFalse(team.isActive(), "团队应已解散");
         assertTrue(team.getWorkers().isEmpty(), "工作者应已清空");
+    }
+
+    @Test
+    @DisplayName("team_dissolve 缺少 requester_id 应返回错误")
+    void testTeamDissolveMissingRequesterId() {
+        team.registerTeamTools();
+
+        MCPClient.ToolResult result = mcpClient.executeTool("team_dissolve", java.util.Map.of());
+
+        assertTrue(result.isSuccess());
+        assertTrue(result.getOutput().contains("错误"), "缺少 requester_id 应返回错误提示");
     }
 
     @Test

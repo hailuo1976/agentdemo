@@ -138,12 +138,17 @@ public class FilePermissionManager {
      */
     private FilePermissionResult checkPermission(String relativePath, FileOperation operation,
                                                 List<PathPattern> allowedPaths) {
-        // 1. 路径安全检查（防止路径遍历）
-        try {
-            PathSecurityUtil.resolveSecure(baseDir, relativePath);
-        } catch (SecurityException e) {
-            logger.logDenied(getOperator(), operation, relativePath, e.getMessage());
-            return FilePermissionResult.deny(e.getMessage());
+        // 判断是否为绝对路径
+        boolean isAbsolutePath = relativePath != null && relativePath.startsWith("/");
+
+        // 1. 路径安全检查（防止路径遍历）- 仅对相对路径
+        if (!isAbsolutePath) {
+            try {
+                PathSecurityUtil.resolveSecure(baseDir, relativePath);
+            } catch (SecurityException e) {
+                logger.logDenied(getOperator(), operation, relativePath, e.getMessage());
+                return FilePermissionResult.deny(e.getMessage());
+            }
         }
 
         // 2. 黑名单路径检查（最高优先级）
@@ -177,6 +182,20 @@ public class FilePermissionManager {
             if (allowed.matches(relativePath)) {
                 logger.logAllowed(getOperator(), operation, relativePath);
                 return FilePermissionResult.allow();
+            }
+        }
+
+        // 5.1 绝对路径白名单检查（仅对绝对路径）
+        if (isAbsolutePath) {
+            List<PathPattern> absoluteAllowedPaths = (operation == FileOperation.READ || operation == FileOperation.LIST)
+                ? config.getAllowedAbsoluteReadPaths()
+                : config.getAllowedAbsoluteWritePaths();
+
+            for (PathPattern allowed : absoluteAllowedPaths) {
+                if (allowed.matches(relativePath)) {
+                    logger.logAllowed(getOperator(), operation, relativePath);
+                    return FilePermissionResult.allow();
+                }
             }
         }
 
