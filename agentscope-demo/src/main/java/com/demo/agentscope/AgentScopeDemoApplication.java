@@ -200,7 +200,7 @@ public class AgentScopeDemoApplication {
             chain.add(new ReplyBudgetControlMiddleware());
 
             // 打印启动信息
-            printStartupInfo(primaryProvider, modelName, mcpClient, permissionEngine);
+            printStartupInfo(primaryProvider, modelName, mcpClient, permissionEngine, tuShareSource);
 
             // 显示当前详细程度
             VerbosityLevel verbosity = VerbosityLevel.fromEnv();
@@ -377,12 +377,19 @@ public class AgentScopeDemoApplication {
      * 打印启动信息摘要。
      */
     private static void printStartupInfo(String provider, String model,
-                                          MCPClient mcpClient, PermissionEngine permissionEngine) {
+                                          MCPClient mcpClient, PermissionEngine permissionEngine,
+                                          TuShareDataSource tuShareSource) {
         ConsoleUI.printSuccess("AgentScope 2.0 初始化完成");
         ConsoleUI.printInfo("提供商: " + provider);
         ConsoleUI.printInfo("模型: " + model);
         ConsoleUI.printInfo("可用工具: " + mcpClient.listTools().size() + " 个");
         ConsoleUI.printInfo("权限模式: " + permissionEngine.getMode());
+        // tushare 可用性诊断(token 仅从环境变量读取,不硬编码)
+        boolean tushareOk = tuShareSource.isAvailable();
+        ConsoleUI.printInfo("TuShare: " + (tushareOk ? "可用" : "未配置 TUSHARE_TOKEN"));
+        if (!tushareOk) {
+            ConsoleUI.printInfo("  提示: 在环境变量中设置 TUSHARE_TOKEN=<你的 token> 后重启");
+        }
         ConsoleUI.printSeparator();
         ConsoleUI.printInfo("输入 help 查看可用命令，或直接输入问题开始对话");
         ConsoleUI.printSeparator();
