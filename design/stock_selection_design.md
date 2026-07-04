@@ -3,7 +3,7 @@
 > 版本：v1.2
 > 日期：2026-07-04
 > 基于：`design/stock_selection_prd.md`
-> 状态：已对齐代码实现（v1.1 → v1.2 修正点见附录 A，共 7 类约 20 处）
+> 状态：已对齐代码实现
 
 ---
 
@@ -15,7 +15,7 @@
 
 1. **双数据源策略**：akshare（主）+ tushare（备），自动降级
 2. **三级兜底初始化**：缓存 → akshare → tushare → 内置 31 个申万一级行业（见 §2.2）
-3. **三级缓存**：行情1h、基本面24h、行业排名7d
+3. **三级缓存**：行情1h、基本面24h、行业排名（当前为占位，未实际拉取，见 §3.5/A.3）
 4. **复合评分**：多因子加权（市值+营收+ROE+品牌度），行业内 z-score 归一化
 5. **多维筛选**：PE/PB/ROE/营收增速/市值区间任意组合
 
@@ -28,17 +28,17 @@ Agent.reply() — ReAct 循环
     ↓
 PermissionMiddleware → 4 条 ALLOW 规则
     ↓
-MCPClient → BuiltinToolExecutor（股票工具实现）
+MCPClient.registerCustomTool() ← StockToolService.registerTools()
     ↓
 StockToolService（工具入口）
     ├── IndustryService（行业树解析）
-    ├── StockDataService（数据采集 + 缓存）
+    ├── StockDataService（数据采集 + 文件缓存）
     │   ├── AkShareDataSource（主数据源）
     │   └── TuShareDataSource（备用数据源）
     ├── LeaderScoringService（评分算法）
     └── StockFilterService（多维筛选）
     ↓
-execute_python（akshare/tushare 拉取） + LocalWorkspace（缓存读写）
+execute_python（akshare/tushare 拉取） + cacheDir（缓存 JSON 读写）
 ```
 
 ---
@@ -693,30 +693,33 @@ public class IndustryService {
 }
 ```
 
-### 2.3 命令行初始化（**未实现**）
+### 2.3 命令行初始化工具（IndustryTreeInitializer）
 
-> **代码状态**：`IndustryTreeInitializer` 类在当前代码库中**不存在**（已通过全量扫描确认）。
-> §2.2 的 `initialize()` 已经在 `AgentScopeDemoApplication` 启动时被自动调用，
-> 内置兜底分支（`loadBuiltinIndustryTree`）也保证了离线场景下行业树可用。
-> 因此本节描述的"独立命令行初始化工具"作为**后续可选项**保留，当前不要假设它已存在。
+> **代码状态**：已实现，见 `industry/IndustryTreeInitializer.java`（56 行）。
+> 提供独立命令行入口，支持 `--force` 强制重拉、`--source akshare|tushare` 选择数据源。
+> 注意：应用启动时的行业树初始化由 `IndustryService.initialize()` 完成（§2.2），本工具仅用于运维场景手动刷新。
 
-调用入口的等价做法（已实现）：在 `AgentScopeDemoApplication.main()` 中调用
-`industryService.initialize()`，三级兜底会自动选择缓存/网络/内置数据。
+调用示例：
 
-历史设想的 API（**仅作设计参考，当前未落地**）：
+```bash
+# 强制从 akshare 重新拉取行业树
+java -cp agentscope-demo-1.0.0.jar \
+  com.demo.agentscope.stock.industry.IndustryTreeInitializer --force --source akshare
 
-```java
-// 设想中的命令行入口（未实现）
-public class IndustryTreeInitializer {
-    public static void main(String[] args) {
-        // --force：跳过缓存强制重拉；--source akshare|tushare：选择数据源
-        // 内部直接调用 industryService.fetchFromAkShare() / fetchFromTuShare()
-    }
-}
+# 或删除缓存文件后重启应用：
+rm workspace/cache/industry_tree.json
 ```
 
-**当前刷新行业树的替代方案**：删除 `workspace/cache/industry_tree.json`，
-重启应用即自动触发 `fetchAndCacheIndustryTree()`。
+入口实现（见 `IndustryTreeInitializer.java:18-55`）：
+
+```java
+public static void main(String[] args) {
+    boolean force = Arrays.asList(args).contains("--force");
+    String source = "akshare"; // 默认
+    // --force 时直接调用 fetchFromAkShare() / fetchFromTuShare()
+    // 否则调用 initialize()（走三级兜底）
+}
+```
 
 ---
 
@@ -724,7 +727,7 @@ public class IndustryTreeInitializer {
 
 ### 3.1 职责
 
-负责股票数据的采集、缓存、更新。支持双数据源（akshare + tushare），三级新鲜度（行情1h、基本面24h、行业排名7d），提供按需刷新、增量更新、降级到过期缓存等能力。
+负责股票数据的采集、缓存、更新。支持双数据源（akshare + tushare），三级新鲜度（行情1h、基本面24h、行业排名当前为占位数据，见 §3.5），提供按需刷新、增量更新、降级到过期缓存等能力。
 
 ### 3.2 数据源接口
 
@@ -1573,7 +1576,7 @@ public class StockFilterService {
         
         // 排除 ST 股
         if (filter.getExcludeSt() != null && filter.getExcludeSt()) {
-            if (entity.getName().contains("ST")) {
+            if (entity.getName() != null && entity.getName().contains("ST")) {
                 return false;
             }
         }
@@ -1700,7 +1703,7 @@ public class StockToolService {
                 result.put("filtered_count", filtered.size());
                 result.put("leaders", topResults);
                 result.put("data_updated_at", Instant.now().toString());
-                result.put("cache_hit", useCache);
+                result.put("cache_hit", useCache);  // 直传请求参数，非实测命中状态
 
                 return objectMapper.writeValueAsString(result);
             }
@@ -1846,7 +1849,7 @@ engine.addRule(new PermissionRule("update_stock_data", PermissionDecision.ALLOW,
 - get_stock_detail: 查询单只股票的完整指标（参数: code, force_refresh）
 - update_stock_data: 刷新股票数据（参数: scope, code/industry, data_type, force）
 
-股票数据来源于 akshare（主）+ tushare（备），带缓存机制（行情1h、基本面24h、行业排名7d）。
+股票数据来源于 akshare（主）+ tushare（备），带缓存机制（行情1h、基本面24h、行业排名当前为占位数据，见 §3.5/A.3）。
 龙头评分基于市值、营收、ROE、品牌度多因子加权计算，行业内归一化到 0-100 分。
 """
 ```
@@ -1862,9 +1865,9 @@ export TUSHARE_TOKEN=your_token_here
 
 | 文件 | 改动量 | 说明 |
 |---|---|---|
-| `AgentScopeDemoApplication.java` | +25 行 | 创建股票服务、注册工具、追加权限规则、更新提示词 |
+| `AgentScopeDemoApplication.java` | ~+40 行 | 创建股票服务、注册工具、追加权限规则、更新提示词 |
 | `AgentTeam.java` | +5 行 | 领导者提示词追加股票工具描述 |
-| 新增 `stock/` 包 | ~2000 行 | 14 个核心类（5 模型 + 1 接口 + 1 异常 + 4 服务 + 2 数据源 + 1 工具服务），见 §8 |
+| 新增 `stock/` 包 | ~2625 行 | 15 个核心类（5 模型 + 1 接口 + 1 异常 + IndustryService + IndustryTreeInitializer + StockDataService + 2 数据源 + LeaderScoringService + StockFilterService + StockToolService），见 §8 |
 | 新增 `stock/` 测试 | ~260 行 | `StockServiceTest`（9 个测试用例，覆盖行业/筛选/评分/模型） |
 
 **不改动**：`MCPClient`、`LocalWorkspace`、`PermissionEngine`、`Agent`、`Middleware` 链。
@@ -1884,7 +1887,8 @@ agentscope-demo/src/main/java/com/demo/agentscope/stock/
 │   ├── StockFilter.java
 │   └── LeaderScoreResult.java
 ├── industry/
-│   └── IndustryService.java
+│   ├── IndustryService.java
+│   └── IndustryTreeInitializer.java  # 命令行初始化工具
 ├── data/
 │   ├── StockDataService.java
 │   ├── StockDataSource.java          # 接口
@@ -1898,17 +1902,15 @@ agentscope-demo/src/main/java/com/demo/agentscope/stock/
 └── StockToolService.java
 ```
 
-> **注**：原设计稿中提及的 `industry/IndustryTreeInitializer.java` 在代码中**不存在**——行业树初始化由 `IndustryService.initialize()` 在应用启动时同步完成，三级兜底策略详见 §2.2。
+> **注**：行业树初始化有两条路径——应用启动时由 `IndustryService.initialize()` 同步完成（三级兜底：缓存 → akshare → tushare → 内置 31 个一级行业），或通过 `IndustryTreeInitializer` CLI 工具（§2.3）手动刷新。
 
 ---
 
 ## 9. 待确认事项
 
 1. **tushare token**：当前实现从 `TUSHARE_TOKEN` 环境变量读取；未设置时 `TuShareDataSource.isAvailable()` 返回 false，自动降级为仅 akshare。
-2. ~~**行业树初始化**：首次启动时自动从 akshare 拉取，还是提供静态 JSON 文件？~~ **已确认**：三级兜底策略（缓存文件 `industry_tree.json` → akshare 拉取 → tushare 拉取 → 内置 31 个一级行业兜底），详见 §2.2 与 `IndustryService.initialize()`。
-3. ~~**评分权重**：默认权重（市值0.4、营收0.25、ROE0.2、品牌0.15）是否合理？~~ **已确认**：权重为 `LeaderScoreResult` 中的 `public static final` 编译期常量（`WEIGHT_MARKET_CAP=0.40` 等，详见 §4.3 表），调整需修改源码并重新编译；不存在运行时可配置的 JSON 文件。
-4. **缓存目录**：当前实现为 `workspace/cache/stocks/`（单股票）与 `workspace/cache/industry_tree.json`（行业树），TTL 见 §3.5（行情 1h、基本面 24h、行业排名未实际拉取）。
-5. **Team 模式**：跨行业对比场景下，工作者是否需要独立的股票工具？当前 `AgentTeam` 仅 leader 持有股票工具描述。
+2. **缓存目录**：当前实现为 `workspace/cache/stocks/`（单股票）与 `workspace/cache/industry_tree.json`（行业树），TTL 见 §3.5（行情 1h、基本面 24h、行业排名未实际拉取）。
+3. **Team 模式**：跨行业对比场景下，工作者是否需要独立的股票工具？当前 `AgentTeam` 仅 leader 持有股票工具描述。
 
 ---
 
@@ -1944,7 +1946,7 @@ agentscope-demo/src/main/java/com/demo/agentscope/stock/
 - **StockFilter**：使用 Builder 模式；除 PE/PB/ROE/市值外，还有 `revenueGrowthMin`/`profitGrowthMin`/`roeYears`/`excludeSt` 字段。
 
 ### A.2 行业服务层（§2）
-- **行业树初始化**：无独立命令行工具；初始化逻辑在 `IndustryService.initialize()` 内，三级兜底：缓存文件 → akshare → tushare → 内置 31 个一级行业。
+- **行业树初始化**：有两条路径——应用启动时由 `IndustryService.initialize()` 同步完成（三级兜底：缓存文件 → akshare → tushare → 内置 31 个一级行业），或通过 `IndustryTreeInitializer` CLI 工具（`--force` / `--source akshare|tushare`）手动刷新。
 - **内置兜底数据**：包含全部 31 个申万一级行业（`801010` 农林牧渔 … `801970` 环保）。
 - **公开方法**：`fetchAndCacheIndustryTree()`、`fetchFromAkShare()`、`fetchFromTuShare()` 均为 `public`，便于测试与外部调用。
 
@@ -1973,12 +1975,11 @@ agentscope-demo/src/main/java/com/demo/agentscope/stock/
 - **update_stock_data**：返回类型为 `StockDataService.RefreshResult`（嵌套静态类，含 `RefreshResult` 与 `FailureInfo` 两个内部记录）。
 
 ### A.6 文件清单（§8）
-- **移除**：`industry/IndustryTreeInitializer.java`（代码中不存在）。
-- **新增**：`data/DataSourceException.java`（自定义受检异常）。
-- **类总数**：14 个主类（5 模型 + 1 接口 + 1 异常 + IndustryService + StockDataService + 2 DataSource + LeaderScoringService + StockFilterService + StockToolService）。
+- **新增**：`industry/IndustryTreeInitializer.java`（CLI 工具，56 行，含 `--force`/`--source` 参数解析）、`data/DataSourceException.java`（自定义受检异常）。
+- **类总数**：15 个主类（5 模型 + 1 接口 + 1 异常 + IndustryService + IndustryTreeInitializer + StockDataService + 2 DataSource + LeaderScoringService + StockFilterService + StockToolService）。
 
 ### A.7 系统集成与计划（§7、§9、§10）
-- **行业树初始化**：在应用启动时由 `IndustryService.initialize()` 同步完成，**不依赖独立 CLI 工具**。
+- **行业树初始化**：在应用启动时由 `IndustryService.initialize()` 同步完成；另提供 `IndustryTreeInitializer` CLI 工具用于手动刷新（`--force` 强制重拉、`--source` 指定数据源）。
 - **§9 待确认事项**：第 2、3 项已确认（行业树三级兜底；权重为编译期常量）。
 - **§10 P2「评分权重可配置」**：当前未实现，需新增 JSON 加载逻辑才能支持运行时配置。
 
