@@ -55,11 +55,11 @@ public class ContextManagerCompressionTest {
     }
 
     private static ContextManager newManager() {
-        // MAX_CONTEXT_TOKENS=4000 / MAX_RECENT_MESSAGES=10 走默认值
+        // maxContextTokens=4000（覆盖默认 40000 以便少量消息也能触发压缩）/ MAX_RECENT_MESSAGES=10 走默认值
         try {
             java.nio.file.Path tmp = java.nio.file.Files.createTempDirectory("stm-test");
             ShortTermMemory stm = new ShortTermMemory(tmp, 100, java.time.Duration.ofHours(1));
-            return new ContextManager(stm, "system-prompt");
+            return new ContextManager(stm, "system-prompt", 4000);
         } catch (java.io.IOException e) {
             throw new RuntimeException(e);
         }

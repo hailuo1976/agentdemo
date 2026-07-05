@@ -26,8 +26,8 @@ public class ContextManager {
     
     private static final Logger log = LoggerFactory.getLogger(ContextManager.class);
     
-    /** 最大上下文token数 */
-    private static final int MAX_CONTEXT_TOKENS = 4000;
+    /** 默认最大上下文 token 数（构造器未指定时使用）。 */
+    private static final int DEFAULT_MAX_CONTEXT_TOKENS = 40000;
 
     /** 最大保留的最近消息数 */
     private static final int MAX_RECENT_MESSAGES = 10;
@@ -50,9 +50,20 @@ public class ContextManager {
     /** 压缩摘要 */
     private String compressedSummary;
 
+    /** 触发压缩的 token 阈值 */
+    private final int maxContextTokens;
+
     public ContextManager(ShortTermMemory shortTermMemory, String systemPrompt) {
+        this(shortTermMemory, systemPrompt, DEFAULT_MAX_CONTEXT_TOKENS);
+    }
+
+    /**
+     * @param maxContextTokens 触发压缩的 token 阈值，&lt;=0 时回退到默认值
+     */
+    public ContextManager(ShortTermMemory shortTermMemory, String systemPrompt, int maxContextTokens) {
         this.shortTermMemory = shortTermMemory;
         this.systemPrompt = systemPrompt;
+        this.maxContextTokens = maxContextTokens > 0 ? maxContextTokens : DEFAULT_MAX_CONTEXT_TOKENS;
     }
 
     /**
@@ -139,9 +150,9 @@ public class ContextManager {
         
         // 5. 估算token数，如果超限则进一步压缩
         int estimatedTokens = Msg.sumEstimatedTokens(context);
-        if (estimatedTokens > MAX_CONTEXT_TOKENS) {
+        if (estimatedTokens > maxContextTokens) {
             int preCount = context.size();
-            log.warn("上下文token数超限: {} > {}，触发压缩", estimatedTokens, MAX_CONTEXT_TOKENS);
+            log.warn("上下文token数超限: {} > {}，触发压缩", estimatedTokens, maxContextTokens);
             List<Msg> compressed = compressContext(context);
 
             // 把压缩后的非 system 消息回写到源历史列表（即 Agent.context），

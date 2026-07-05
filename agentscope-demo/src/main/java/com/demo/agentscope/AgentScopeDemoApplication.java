@@ -71,6 +71,10 @@ public class AgentScopeDemoApplication {
     private static final boolean STOCK_TOOLS_ENABLED =
             Boolean.parseBoolean(System.getenv().getOrDefault("STOCK_TOOLS_ENABLED", "false"));
 
+    /** 上下文压缩阈值（token 数），通过 MAX_CONTEXT_TOKENS 环境变量调整，默认 40000。 */
+    private static final int MAX_CONTEXT_TOKENS =
+            Integer.parseInt(System.getenv().getOrDefault("MAX_CONTEXT_TOKENS", "40000"));
+
     /** 股票工具名称清单，用于运行期 /stock off 反注册。 */
     private static final List<String> STOCK_TOOL_NAMES = List.of(
             "list_industries", "select_industry_leaders",
@@ -220,7 +224,7 @@ public class AgentScopeDemoApplication {
             );
 
             // 8.3 创建智能上下文管理器并集成到智能体
-            ContextManager contextManager = new ContextManager(shortTermMemory, systemPrompt);
+            ContextManager contextManager = new ContextManager(shortTermMemory, systemPrompt, MAX_CONTEXT_TOKENS);
             contextManager.setLongTermMemory(longTermMemory);
             agent.setContextManager(contextManager);
 
