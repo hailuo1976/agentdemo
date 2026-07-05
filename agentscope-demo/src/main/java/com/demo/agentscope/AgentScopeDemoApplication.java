@@ -6,6 +6,7 @@ import com.demo.agentscope.cache.IntermediateResultManager;
 import com.demo.agentscope.context.ContextManager;
 import com.demo.agentscope.credential.CredentialProvider;
 import com.demo.agentscope.credential.DefaultCredentialProvider;
+import com.demo.agentscope.event.EventStream;
 import com.demo.agentscope.execution.CodeExecutionManager;
 import com.demo.agentscope.filepermission.FilePermissionConfig;
 import com.demo.agentscope.filepermission.FilePermissionManager;
@@ -66,17 +67,17 @@ public class AgentScopeDemoApplication {
 
     private static final Logger log = LoggerFactory.getLogger(AgentScopeDemoApplication.class);
 
-    /** 智能体系统提示词 */
-    private static final String SYSTEM_PROMPT = """
-            你是 AgentScope 2.0 智能体助手。你可以通过调用工具来帮助用户完成各种任务。
-            可用工具包括：
-            - read_file: 读取文件内容（参数: path）
-            - write_file: 写入文件（参数: path, content）
-            - edit_file: 编辑文件（参数: path, old_text, new_text）
-            - list_files: 列出目录内容（参数: dir）
-            - execute_python: 执行 Python 代码并返回结果（参数: code，支持多行）
-            - execute_command: 执行 Shell 命令并返回结果（参数: command）
-            - install_package: 通过 pip 安装 Python 第三方库（参数: package）
+    /** 股票工具功能开关（默认关闭，避免污染非股票场景的模型推理）。 */
+    private static final boolean STOCK_TOOLS_ENABLED =
+            Boolean.parseBoolean(System.getenv().getOrDefault("STOCK_TOOLS_ENABLED", "false"));
+
+    /** 股票工具名称清单，用于运行期 /stock off 反注册。 */
+    private static final List<String> STOCK_TOOL_NAMES = List.of(
+            "list_industries", "select_industry_leaders",
+            "get_stock_detail", "update_stock_data");
+
+    /** 系统提示词中追加的股票工具描述，便于 /stock on 时动态注入。 */
+    private static final String STOCK_PROMPT_ADDENDUM = """
 
             股票研究工具：
             - list_industries: 列出申万行业分类树（参数: level, parent）
@@ -84,16 +85,41 @@ public class AgentScopeDemoApplication {
             - get_stock_detail: 查询单只股票的完整指标（参数: code, force_refresh）
             - update_stock_data: 刷新股票数据（参数: scope, code/industry, data_type, force）
 
-            在回答问题时，如果需要获取实时信息或执行操作，请优先使用可用的工具。
-            当用户要求读取或写入文件时，使用对应的文件工具。
-            当需要计算、数据处理、网络请求或运行脚本时，使用 execute_python 执行代码并直接返回结果，不要只写代码让用户自己跑。
-            当执行失败时，请分析错误原因，修正代码后重试。
-            文件操作受权限管控，只能访问授权目录下的文件。
-            代码执行受安全策略限制（禁止危险命令、30秒超时）。
             股票数据来源于 akshare（主）+ tushare（备），带缓存机制（行情1h、基本面24h、行业排名7d）。
             龙头评分基于市值、营收、ROE、品牌度多因子加权计算，行业内归一化到 0-100 分。
-            回答时请保持简洁、准确，使用中文回复。
             """;
+
+    /**
+     * 构建系统提示词。
+     *
+     * @param stockEnabled 是否启用股票工具，启用时追加股票工具描述与数据源说明
+     */
+    private static String buildSystemPrompt(boolean stockEnabled) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("""
+                你是 AgentScope 2.0 智能体助手。你可以通过调用工具来帮助用户完成各种任务。
+                可用工具包括：
+                - read_file: 读取文件内容（参数: path）
+                - write_file: 写入文件（参数: path, content）
+                - edit_file: 编辑文件（参数: path, old_text, new_text）
+                - list_files: 列出目录内容（参数: dir）
+                - execute_python: 执行 Python 代码并返回结果（参数: code，支持多行）
+                - execute_command: 执行 Shell 命令并返回结果（参数: command）
+                - install_package: 通过 pip 安装 Python 第三方库（参数: package）
+
+                在回答问题时，如果需要获取实时信息或执行操作，请优先使用可用的工具。
+                当用户要求读取或写入文件时，使用对应的文件工具。
+                当需要计算、数据处理、网络请求或运行脚本时，使用 execute_python 执行代码并直接返回结果，不要只写代码让用户自己跑。
+                当执行失败时，请分析错误原因，修正代码后重试。
+                文件操作受权限管控，只能访问授权目录下的文件。
+                代码执行受安全策略限制（禁止危险命令、30秒超时）。
+                """);
+        if (stockEnabled) {
+            sb.append(STOCK_PROMPT_ADDENDUM);
+        }
+        sb.append("回答时请保持简洁、准确，使用中文回复。\n");
+        return sb.toString();
+    }
 
     public static void main(String[] args) {
         // 1. 打印横幅
@@ -131,30 +157,35 @@ public class AgentScopeDemoApplication {
                     Duration.ofHours(24));
             mcpClient.registerCacheTools(cacheManager);
 
-            // 4.4 创建股票服务并注册股票工具
-            IndustryService industryService = new IndustryService(executionManager,
-                    workspaceDir.resolve("cache"));
-            industryService.initialize();
+            // 4.4 股票分析工具（受 STOCK_TOOLS_ENABLED 开关控制，默认关闭）
+            TuShareDataSource tuShareSource = STOCK_TOOLS_ENABLED ? new TuShareDataSource(executionManager) : null;
+            if (STOCK_TOOLS_ENABLED) {
+                IndustryService industryService = new IndustryService(executionManager,
+                        workspaceDir.resolve("cache"));
+                industryService.initialize();
 
-            AkShareDataSource akShareSource = new AkShareDataSource(executionManager);
-            TuShareDataSource tuShareSource = new TuShareDataSource(executionManager);
-            StockDataService stockDataService = new StockDataService(
-                    workspaceDir.resolve("cache/stocks"),
-                    List.of(akShareSource, tuShareSource),
-                    industryService);
+                AkShareDataSource akShareSource = new AkShareDataSource(executionManager);
+                StockDataService stockDataService = new StockDataService(
+                        workspaceDir.resolve("cache/stocks"),
+                        List.of(akShareSource, tuShareSource),
+                        industryService);
 
-            LeaderScoringService scoringService = new LeaderScoringService();
-            StockFilterService filterService = new StockFilterService();
+                LeaderScoringService scoringService = new LeaderScoringService();
+                StockFilterService filterService = new StockFilterService();
 
-            StockToolService stockToolService = new StockToolService(
-                    industryService,
-                    stockDataService,
-                    scoringService,
-                    filterService);
-            stockToolService.registerTools(mcpClient);
+                StockToolService stockToolService = new StockToolService(
+                        industryService,
+                        stockDataService,
+                        scoringService,
+                        filterService);
+                stockToolService.registerTools(mcpClient);
+                log.info("股票分析工具已启用 ({} 个工具)", STOCK_TOOL_NAMES.size());
+            } else {
+                log.info("股票分析工具已禁用 (STOCK_TOOLS_ENABLED=false，可通过 /stock on 或环境变量启用)");
+            }
 
             // 5. 创建权限引擎，配置默认规则
-            PermissionEngine permissionEngine = createPermissionEngine();
+            PermissionEngine permissionEngine = createPermissionEngine(STOCK_TOOLS_ENABLED);
 
             // 6. 创建工作空间管理器
             WorkspaceManager workspaceManager = new WorkspaceManager();
@@ -163,9 +194,10 @@ public class AgentScopeDemoApplication {
             ChatModel chatModel = new ChatModel(credentialProvider);
 
             // 8. 创建智能体
+            String systemPrompt = buildSystemPrompt(STOCK_TOOLS_ENABLED);
             Agent agent = new Agent(
                     "AgentScope-2.0",
-                    SYSTEM_PROMPT,
+                    systemPrompt,
                     chatModel,
                     mcpClient,
                     credentialProvider,
@@ -188,7 +220,7 @@ public class AgentScopeDemoApplication {
             );
 
             // 8.3 创建智能上下文管理器并集成到智能体
-            ContextManager contextManager = new ContextManager(shortTermMemory, SYSTEM_PROMPT);
+            ContextManager contextManager = new ContextManager(shortTermMemory, systemPrompt);
             contextManager.setLongTermMemory(longTermMemory);
             agent.setContextManager(contextManager);
 
@@ -200,7 +232,7 @@ public class AgentScopeDemoApplication {
             chain.add(new ReplyBudgetControlMiddleware());
 
             // 打印启动信息
-            printStartupInfo(primaryProvider, modelName, mcpClient, permissionEngine, tuShareSource);
+            printStartupInfo(primaryProvider, modelName, mcpClient, permissionEngine, STOCK_TOOLS_ENABLED);
 
             // 显示当前详细程度
             VerbosityLevel verbosity = VerbosityLevel.fromEnv();
@@ -208,7 +240,10 @@ public class AgentScopeDemoApplication {
             ConsoleUI.printInfo("可通过 verbosity 命令调整详细程度，或设置环境变量 VERBOSITY=MINIMAL|STANDARD|VERBOSE|DEBUG");
 
             // 9. 进入 REPL 主循环
-            runREPL(agent, credentialProvider, chatModel, mcpClient, permissionEngine, workspaceManager, primaryProvider);
+            java.util.concurrent.atomic.AtomicBoolean stockEnabled =
+                    new java.util.concurrent.atomic.AtomicBoolean(STOCK_TOOLS_ENABLED);
+            runREPL(agent, credentialProvider, chatModel, mcpClient, permissionEngine, workspaceManager, primaryProvider,
+                    stockEnabled, secureFileWorkspace, executionManager, workspaceDir);
 
         } catch (Exception e) {
             log.error("应用启动失败", e);
@@ -334,7 +369,7 @@ public class AgentScopeDemoApplication {
      * 默认模式为 DONT_ASK（ASK 决策自动降级为 DENY）。
      * </p>
      */
-    private static PermissionEngine createPermissionEngine() {
+    private static PermissionEngine createPermissionEngine(boolean stockEnabled) {
         PermissionEngine engine = new PermissionEngine(PermissionMode.DONT_ASK, true);
 
         // 允许安全工具
@@ -360,11 +395,10 @@ public class AgentScopeDemoApplication {
         engine.addRule(new PermissionRule("agent_list", PermissionDecision.ALLOW, "列出团队工作者"));
         engine.addRule(new PermissionRule("team_dissolve", PermissionDecision.ALLOW, "解散团队"));
 
-        // 允许股票工具
-        engine.addRule(new PermissionRule("list_industries", PermissionDecision.ALLOW, "行业分类查询"));
-        engine.addRule(new PermissionRule("select_industry_leaders", PermissionDecision.ALLOW, "龙头筛选"));
-        engine.addRule(new PermissionRule("get_stock_detail", PermissionDecision.ALLOW, "单股详情"));
-        engine.addRule(new PermissionRule("update_stock_data", PermissionDecision.ALLOW, "数据更新"));
+        // 允许股票工具（受 STOCK_TOOLS_ENABLED 控制）
+        if (stockEnabled) {
+            addStockPermissionRules(engine);
+        }
 
         // 需要确认的工具
         engine.addRule(new PermissionRule("bash", PermissionDecision.ASK, "Shell 命令需人工确认"));
@@ -378,18 +412,13 @@ public class AgentScopeDemoApplication {
      */
     private static void printStartupInfo(String provider, String model,
                                           MCPClient mcpClient, PermissionEngine permissionEngine,
-                                          TuShareDataSource tuShareSource) {
+                                          boolean stockEnabled) {
         ConsoleUI.printSuccess("AgentScope 2.0 初始化完成");
         ConsoleUI.printInfo("提供商: " + provider);
         ConsoleUI.printInfo("模型: " + model);
         ConsoleUI.printInfo("可用工具: " + mcpClient.listTools().size() + " 个");
         ConsoleUI.printInfo("权限模式: " + permissionEngine.getMode());
-        // tushare 可用性诊断(token 仅从环境变量读取,不硬编码)
-        boolean tushareOk = tuShareSource.isAvailable();
-        ConsoleUI.printInfo("TuShare: " + (tushareOk ? "可用" : "未配置 TUSHARE_TOKEN"));
-        if (!tushareOk) {
-            ConsoleUI.printInfo("  提示: 在环境变量中设置 TUSHARE_TOKEN=<你的 token> 后重启");
-        }
+        ConsoleUI.printInfo("股票工具: " + (stockEnabled ? "已启用" : "已禁用（/stock on 开启）"));
         ConsoleUI.printSeparator();
         ConsoleUI.printInfo("输入 help 查看可用命令，或直接输入问题开始对话");
         ConsoleUI.printSeparator();
@@ -421,7 +450,11 @@ public class AgentScopeDemoApplication {
                                 MCPClient mcpClient,
                                 PermissionEngine permissionEngine,
                                 WorkspaceManager workspaceManager,
-                                String providerName) {
+                                String providerName,
+                                java.util.concurrent.atomic.AtomicBoolean stockEnabled,
+                                SecureFileWorkspace secureFileWorkspace,
+                                CodeExecutionManager executionManager,
+                                Path workspaceDir) {
         AgentTeam team = null;
         boolean showEvents = false;
 
@@ -600,26 +633,63 @@ public class AgentScopeDemoApplication {
                 continue;
             }
 
+            if (trimmed.toLowerCase().startsWith("/stock")) {
+                String arg = trimmed.substring("/stock".length()).trim().toLowerCase();
+                if (arg.isEmpty()) {
+                    ConsoleUI.printInfo("当前股票工具状态: " + (stockEnabled.get() ? "开启" : "关闭"));
+                    ConsoleUI.printInfo("用法: /stock on | /stock off");
+                    continue;
+                }
+                switch (arg) {
+                    case "on" -> {
+                        if (stockEnabled.get()) {
+                            ConsoleUI.printInfo("股票工具已处于开启状态");
+                        } else {
+                            enableStockTools(mcpClient, permissionEngine, agent, secureFileWorkspace,
+                                    executionManager, workspaceDir);
+                            stockEnabled.set(true);
+                            ConsoleUI.printSuccess("股票分析工具已开启（" + STOCK_TOOL_NAMES.size() + " 个工具）");
+                        }
+                    }
+                    case "off" -> {
+                        if (!stockEnabled.get()) {
+                            ConsoleUI.printInfo("股票工具已处于关闭状态");
+                        } else {
+                            for (String tool : STOCK_TOOL_NAMES) {
+                                mcpClient.unregisterTool(tool);
+                                permissionEngine.removeRule(tool);
+                            }
+                            stockEnabled.set(false);
+                            ConsoleUI.printSuccess("股票分析工具已关闭");
+                            ConsoleUI.printInfo("提示: 系统提示词中的股票说明需重启后清除");
+                        }
+                    }
+                    default -> ConsoleUI.printError("无效参数: " + arg + "（用法: /stock on | /stock off）");
+                }
+                continue;
+            }
+
             // ---- 智能体对话 ----
 
             try {
                 long startTime = System.currentTimeMillis();
-                Msg response;
 
                 if (team != null && team.isActive()) {
-                    // 如果团队存在，委托给团队回复
-                    response = team.reply(trimmed);
+                    // 团队模式：仍走非流式（团队内多智能体协作暂不流式）
+                    Msg response = team.reply(trimmed);
+                    ConsoleUI.printAgentResponse(response);
                 } else {
-                    // 否则由单个智能体回复
-                    response = agent.reply(trimmed);
+                    // 单智能体：走流式路径，token 级实时回显
+                    EventStream stream = agent.replyStream(trimmed);
+
+                    // 流路径下由 progressTracker.onTextDelta 已实时输出文本
+                    // 若需要事件回放视图，可在此打印
+                    if (showEvents) {
+                        ConsoleUI.printEventStream(stream);
+                    }
                 }
 
                 long duration = System.currentTimeMillis() - startTime;
-
-                // 打印响应
-                ConsoleUI.printAgentResponse(response);
-
-                // 如果开启事件展示模式，打印追踪摘要
                 if (showEvents) {
                     ConsoleUI.printInfo("响应耗时: " + duration + "ms");
                 }
@@ -629,6 +699,45 @@ public class AgentScopeDemoApplication {
                 ConsoleUI.printError("处理失败: " + e.getMessage());
                 ConsoleUI.printInfo("输入 help 查看可用命令");
             }
+        }
+    }
+
+    /**
+     * 运行期启用股票分析工具：构造数据源、注册工具、添加权限规则、追加系统提示词。
+     */
+    private static void enableStockTools(MCPClient mcpClient, PermissionEngine permissionEngine, Agent agent,
+                                          SecureFileWorkspace secureFileWorkspace,
+                                          CodeExecutionManager executionManager, Path workspaceDir) {
+        IndustryService industryService = new IndustryService(executionManager,
+                workspaceDir.resolve("cache"));
+        industryService.initialize();
+
+        AkShareDataSource akShareSource = new AkShareDataSource(executionManager);
+        TuShareDataSource tuShareSource = new TuShareDataSource(executionManager);
+        StockDataService stockDataService = new StockDataService(
+                workspaceDir.resolve("cache/stocks"),
+                List.of(akShareSource, tuShareSource),
+                industryService);
+
+        StockToolService stockToolService = new StockToolService(
+                industryService,
+                stockDataService,
+                new LeaderScoringService(),
+                new StockFilterService());
+        stockToolService.registerTools(mcpClient);
+
+        addStockPermissionRules(permissionEngine);
+
+        agent.appendToSystemPrompt(STOCK_PROMPT_ADDENDUM);
+        log.info("运行期已启用股票分析工具");
+    }
+
+    /**
+     * 添加股票工具的 ALLOW 规则。启动期与运行期共用，避免规则散落多处。
+     */
+    private static void addStockPermissionRules(PermissionEngine engine) {
+        for (String tool : STOCK_TOOL_NAMES) {
+            engine.addRule(new PermissionRule(tool, PermissionDecision.ALLOW, "股票分析工具"));
         }
     }
 }

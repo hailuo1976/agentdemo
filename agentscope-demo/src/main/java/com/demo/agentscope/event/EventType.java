@@ -27,8 +27,12 @@ public enum EventType {
 
     /** 文本内容块 */
     TEXT_BLOCK,
+    /** 文本增量片段（流式） */
+    TEXT_DELTA,
     /** 思考内容块 */
     THINKING_BLOCK,
+    /** 思考增量片段（流式） */
+    THINKING_DELTA,
 
     // ---- 工具交互 ----
 

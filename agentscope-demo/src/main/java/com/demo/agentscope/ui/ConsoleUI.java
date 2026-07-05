@@ -182,7 +182,9 @@ public class ConsoleUI {
             case MODEL_CALL_START -> BLUE + "📡" + RESET;
             case MODEL_CALL_END -> BLUE + "📡" + RESET;
             case TEXT_BLOCK -> GREEN + "💬" + RESET;
+            case TEXT_DELTA -> GREEN + "💬" + RESET;
             case THINKING_BLOCK -> YELLOW + "🧠" + RESET;
+            case THINKING_DELTA -> YELLOW + "🧠" + RESET;
             case TOOL_CALL -> CYAN + "🔧" + RESET;
             case TOOL_RESULT -> CYAN + "⚙️" + RESET;
             case REQUIRE_USER_CONFIRM -> YELLOW + "❓" + RESET;
@@ -217,9 +219,17 @@ public class ConsoleUI {
                 String content = event.getData("content", String.class);
                 yield "文本: " + (content != null && content.length() > 60 ? content.substring(0, 60) + "..." : content);
             }
+            case TEXT_DELTA -> {
+                String delta = event.getData("delta", String.class);
+                yield "文本增量: " + (delta != null && delta.length() > 60 ? delta.substring(0, 60) + "..." : delta);
+            }
             case THINKING_BLOCK -> {
                 String content = event.getData("content", String.class);
                 yield "思考: " + (content != null && content.length() > 60 ? content.substring(0, 60) + "..." : content);
+            }
+            case THINKING_DELTA -> {
+                String delta = event.getData("delta", String.class);
+                yield "思考增量: " + (delta != null && delta.length() > 60 ? delta.substring(0, 60) + "..." : delta);
             }
             case TOOL_CALL -> "工具调用: " + event.getData("toolName", String.class);
             case TOOL_RESULT -> "工具结果: " + event.getData("toolName", String.class);
@@ -394,6 +404,7 @@ public class ConsoleUI {
         System.out.println("  " + CYAN + "events" + RESET + "     - 切换事件展示模式");
         System.out.println("  " + CYAN + "permission" + RESET + " - 显示权限规则");
         System.out.println("  " + CYAN + "verbosity" + RESET + "  - 调整界面信息详细程度");
+        System.out.println("  " + CYAN + "/stock on|off" + RESET + " - 开启/关闭股票分析工具");
         System.out.println("  " + CYAN + "help" + RESET + "       - 显示此帮助信息");
         System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
         System.out.println();

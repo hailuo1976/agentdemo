@@ -26,6 +26,9 @@ public class AgentProgressTracker {
     /** 开始时间 */
     private long startTimeMs;
 
+    /** 思考流是否已经开始（用于控制 DIM 样式只在首尾输出一次） */
+    private boolean thinkingStreamStarted;
+
     public AgentProgressTracker(String agentName, VerbosityLevel verbosity) {
         this.agentName = agentName;
         this.verbosity = verbosity;
@@ -108,6 +111,48 @@ public class AgentProgressTracker {
      */
     public void onError(String error) {
         System.out.println("\u001B[31m  ❌ 错误: " + error + "\u001B[0m");
+    }
+
+    /**
+     * 流式文本增量实时回显。
+     * <p>
+     * 不换行直接输出，刷新 stdout 以实现 token 级实时渲染。
+     * 在 MINIMAL/QUIET 模式下静默。
+     * </p>
+     *
+     * @param delta 文本增量片段
+     */
+    public void onTextDelta(String delta) {
+        if (verbosity == VerbosityLevel.MINIMAL) return;
+        System.out.print(delta);
+        System.out.flush();
+    }
+
+    /**
+     * 流式思考增量实时回显（DIM 样式）。
+     *
+     * @param delta 思考内容增量片段
+     */
+    public void onThinkingDelta(String delta) {
+        if (verbosity == VerbosityLevel.MINIMAL) return;
+        if (!thinkingStreamStarted) {
+            System.out.print("\u001B[2m");
+            thinkingStreamStarted = true;
+        }
+        System.out.print(delta);
+        System.out.flush();
+    }
+
+    /**
+     * 流式回复结束：换行收尾，避免后续输出粘连。同时闭合思考流的 DIM 样式。
+     */
+    public void onStreamEnd() {
+        if (verbosity == VerbosityLevel.MINIMAL) return;
+        if (thinkingStreamStarted) {
+            System.out.print("\u001B[0m");
+            thinkingStreamStarted = false;
+        }
+        System.out.println();
     }
 
     public int getCurrentIteration() {

@@ -115,41 +115,156 @@ public class ChatModel {
     }
 
     /**
-     * 流式聊天请求（演示模式：内部调用 chat 并包装为事件流）。
+     * 流式聊天请求（SSE，token 级实时返回）。
+     * <p>
+     * 同步阻塞读取 SSE 流，每解析出一个事件（TEXT_DELTA / THINKING_DELTA / TOOL_CALL /
+     * MODEL_CALL_END）就立即通过 {@link StreamSink#onEvent(AgentEvent)} 上推到调用方。
+     * 这避免了"先全部读完再回放"的两阶段模式，使控制台能真正 token 级渲染。
+     * </p>
      *
      * @param providerName 提供商名称
      * @param messages     消息列表
      * @param tools        可用工具信息列表
      * @param agentId      智能体ID
-     * @return 事件流
+     * @param sink         实时事件下沉（由 Agent 提供，负责转发到外层 EventStream 和进度跟踪器）
      */
-    public EventStream chatStream(String providerName, List<Msg> messages,
-                                  List<MCPClient.ToolInfo> tools, String agentId) {
-        EventStream stream = new EventStream(agentId);
-        Msg response = chat(providerName, messages, tools);
+    public void chatStream(String providerName, List<Msg> messages,
+                           List<MCPClient.ToolInfo> tools, String agentId,
+                           StreamSink sink) {
+        String apiKey = credentialProvider.getApiKey(providerName);
+        String baseUrl = credentialProvider.getBaseUrl(providerName);
+        String modelName = credentialProvider.getModelName(providerName);
 
-        // 将响应内容转换为事件流
-        for (ContentBlock block : response.getContent()) {
-            if (block instanceof ContentBlock.TextBlock textBlock) {
-                stream.emit(AgentEvent.textBlock(agentId, textBlock.getText()));
-            } else if (block instanceof ContentBlock.ThinkingBlock thinkingBlock) {
-                stream.emit(AgentEvent.thinkingBlock(agentId, thinkingBlock.getText()));
-            } else if (block instanceof ContentBlock.ToolCallBlock toolCallBlock) {
-                Map<String, Object> args = new HashMap<>();
-                args.put("raw", toolCallBlock.getArguments());
-                stream.emit(AgentEvent.toolCall(agentId, toolCallBlock.getName(), args));
+        if (apiKey == null) {
+            sink.onEvent(AgentEvent.error(agentId, "提供商 [" + providerName + "] API Key 未配置"));
+            sink.onEvent(AgentEvent.modelCallEnd(agentId, modelName, 0, 0));
+            return;
+        }
+
+        ObjectNode requestBody = buildRequestBody(modelName, messages, tools);
+        requestBody.put("stream", true);
+        requestBody.putObject("stream_options").put("include_usage", true);
+
+        String url = baseUrl + "/chat/completions";
+        log.debug("发送流式聊天请求: provider={}, model={}, url={}", providerName, modelName, url);
+
+        Request request = new Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer " + apiKey)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Accept", "text/event-stream")
+                .post(RequestBody.create(requestBody.toString(), JSON_MEDIA_TYPE))
+                .build();
+
+        // 工具调用增量累积器：按 index 拼接 arguments 分片
+        Map<Integer, ToolCallAccumulator> toolCallAccumulators = new TreeMap<>();
+        StringBuilder textBuffer = new StringBuilder();
+        StringBuilder reasoningBuffer = new StringBuilder();
+        int[] usage = {0, 0};
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                String body = response.body() != null ? response.body().string() : "无响应体";
+                throw new IOException("API 流式请求失败: status=" + response.code() + ", body=" + body);
             }
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(
+                            response.body().byteStream(),
+                            java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.isEmpty()) continue;
+                    if (!line.startsWith("data:")) continue;
+                    String payload = line.substring(5).trim();
+                    if ("[DONE]".equals(payload)) break;
+                    parseStreamFrame(payload, agentId, toolCallAccumulators,
+                            textBuffer, reasoningBuffer, usage, sink);
+                }
+            }
+        } catch (IOException e) {
+            log.error("流式聊天请求异常: provider={}, model={}", providerName, modelName, e);
+            sink.onEvent(AgentEvent.error(agentId, "流式请求失败: " + e.getMessage()));
         }
 
-        // 添加 token 用量事件
-        if (response.getUsage() != null) {
-            stream.emit(AgentEvent.modelCallEnd(agentId,
-                    credentialProvider.getModelName(providerName),
-                    response.getUsage().getPromptTokens(),
-                    response.getUsage().getCompletionTokens()));
+        // 流结束：聚合 tool_calls（arguments 分片已完整）+ 发射 MODEL_CALL_END
+        for (ToolCallAccumulator acc : toolCallAccumulators.values()) {
+            Map<String, Object> args = new HashMap<>();
+            args.put("id", acc.id);
+            args.put("name", acc.name);
+            args.put("arguments", acc.arguments.toString());
+            args.put("raw", acc.arguments.toString());
+            sink.onEvent(AgentEvent.toolCall(agentId, acc.name, args));
         }
+        sink.onEvent(AgentEvent.modelCallEnd(agentId, modelName, usage[0], usage[1]));
+    }
 
-        return stream;
+    /**
+     * 解析 SSE 单帧 data 负载，delta 事件实时上推到 sink。
+     */
+    private void parseStreamFrame(String payload, String agentId,
+                                   Map<Integer, ToolCallAccumulator> toolCallAccumulators,
+                                   StringBuilder textBuffer, StringBuilder reasoningBuffer,
+                                   int[] usage, StreamSink sink) {
+        try {
+            JsonNode root = OBJECT_MAPPER.readTree(payload);
+            JsonNode choices = root.path("choices");
+            if (choices.isArray() && !choices.isEmpty()) {
+                JsonNode delta = choices.get(0).path("delta");
+
+                // 文本 delta —— 实时上推
+                String content = delta.path("content").asText("");
+                if (!content.isEmpty()) {
+                    textBuffer.append(content);
+                    sink.onEvent(AgentEvent.textDelta(agentId, content));
+                }
+
+                // 思考链 delta（DeepSeek / GLM 等支持）—— 实时上推
+                String reasoning = delta.path("reasoning_content").asText("");
+                if (!reasoning.isEmpty()) {
+                    reasoningBuffer.append(reasoning);
+                    sink.onEvent(AgentEvent.thinkingDelta(agentId, reasoning));
+                }
+
+                // 工具调用 delta（按 index 拼接 arguments 分片）
+                JsonNode toolCalls = delta.path("tool_calls");
+                if (toolCalls.isArray()) {
+                    for (JsonNode tc : toolCalls) {
+                        int idx = tc.path("index").asInt(0);
+                        ToolCallAccumulator acc = toolCallAccumulators
+                                .computeIfAbsent(idx, k -> new ToolCallAccumulator());
+                        if (acc.id == null) {
+                            String id = tc.path("id").asText(null);
+                            if (id != null) acc.id = id;
+                        }
+                        JsonNode fn = tc.path("function");
+                        if (acc.name == null) {
+                            String name = fn.path("name").asText(null);
+                            if (name != null) acc.name = name;
+                        }
+                        String argsFragment = fn.path("arguments").asText("");
+                        if (!argsFragment.isEmpty()) {
+                            acc.arguments.append(argsFragment);
+                        }
+                    }
+                }
+            }
+
+            // 最后一帧的 usage（stream_options.include_usage=true 时）
+            JsonNode usageNode = root.path("usage");
+            if (!usageNode.isMissingNode() && !usageNode.isNull()) {
+                usage[0] = usageNode.path("prompt_tokens").asInt(0);
+                usage[1] = usageNode.path("completion_tokens").asInt(0);
+            }
+        } catch (Exception e) {
+            log.warn("解析 SSE 帧失败: {}", payload, e);
+        }
+    }
+
+    /** 流式工具调用累积器：按 index 聚合分片。 */
+    private static final class ToolCallAccumulator {
+        String id;
+        String name;
+        final StringBuilder arguments = new StringBuilder();
     }
 
     // ==================== 请求构建 ====================

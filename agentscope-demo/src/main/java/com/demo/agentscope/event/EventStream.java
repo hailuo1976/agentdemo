@@ -7,7 +7,6 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * 事件流。
@@ -21,7 +20,7 @@ public class EventStream {
 
     private static final Logger log = LoggerFactory.getLogger(EventStream.class);
 
-    /** 事件列表，使用线程安全集合支持并发访问 */
+    /** 事件列表 —— 单线程内 emit/读取，无需 CopyOnWriteArrayList（避免流式 O(N²) 复制开销） */
     private final List<AgentEvent> events;
 
     /** 关联的智能体ID */
@@ -29,7 +28,7 @@ public class EventStream {
 
     public EventStream(String agentId) {
         this.agentId = agentId;
-        this.events = new CopyOnWriteArrayList<>();
+        this.events = new ArrayList<>();
     }
 
     /**
@@ -131,17 +130,24 @@ public class EventStream {
                 }
                 case TOOL_CALL -> {
                     String toolName = event.getData("toolName", String.class);
+                    String callId = event.getData("id", String.class);
                     @SuppressWarnings("unchecked")
                     Map<String, Object> args = event.getData("arguments", Map.class);
-                    String argsStr = "";
+                    String argsStr;
                     if (args != null && !args.isEmpty()) {
-                        argsStr = args.toString();
+                        // 流式路径下 args 包含 id/name/arguments/raw 顶层键，
+                        // 真正的 arguments 字符串在 "raw" 下；非流式路径则直接是参数 Map。
+                        Object raw = args.get("raw");
+                        argsStr = raw instanceof String s ? s : args.toString();
+                    } else {
+                        argsStr = "";
                     }
-                    String callId = "call_" + toolCallIndex++;
+                    if (callId == null || callId.isEmpty()) {
+                        callId = "call_" + toolCallIndex++;
+                    }
                     contentBlocks.add(new ContentBlock.ToolCallBlock(callId, toolName, argsStr));
                 }
                 case TOOL_RESULT -> {
-                    String toolName = event.getData("toolName", String.class);
                     String result = event.getData("result", String.class);
                     String resultCallId = "call_" + Math.max(0, toolCallIndex - 1);
                     contentBlocks.add(new ContentBlock.ToolResultBlock(resultCallId, result, false));

@@ -108,6 +108,26 @@ public class MCPClient {
         log.info("已注册自定义工具: {}", name);
     }
 
+    /**
+     * 注销已注册的工具（内置或通过 {@link #registerCustomTool} 注册的自定义工具）。
+     * <p>
+     * 用于运行期动态关闭某类工具（例如关闭股票分析工具）。
+     * 不会影响外部 MCP 服务器提供的工具。
+     * </p>
+     *
+     * @param name 要注销的工具名称
+     * @return 是否成功移除（false 表示工具不存在）
+     */
+    public boolean unregisterTool(String name) {
+        BuiltinToolEntry removed = builtinTools.remove(name);
+        if (removed == null) {
+            return false;
+        }
+        allToolInfos.removeIf(info -> name.equals(info.name()));
+        log.info("已注销工具: {}", name);
+        return true;
+    }
+
     /** 安全文件工作空间（用于文件读写工具） */
     private SecureFileWorkspace fileWorkspace;
 

@@ -300,16 +300,26 @@ public class Agent {
 
     /**
      * 流式回复，边执行边发射事件。
+     * <p>
+     * 调用真实的 SSE 流式 API（{@link ChatModel#chatStream}），token 级实时回显。
+     * 流式路径下，TEXT_DELTA / THINKING_DELTA 实时转发给 {@link AgentProgressTracker}
+     * 进行控制台渲染；流结束后聚合为完整 assistant Msg 加入上下文。
+     * </p>
      *
      * @param userInput 用户输入文本
-     * @return 事件流
+     * @return 事件流（已消费完毕，包含完整的 delta / tool_call / model_call_end 事件）
      */
     public EventStream replyStream(String userInput) {
         log.info("智能体 [{}] 流式回复开始", name);
 
+        // 进度跟踪：每次回复都按当前 verbosity 重建跟踪器
+        this.progressTracker = new AgentProgressTracker(name, VerbosityLevel.fromEnv());
+        progressTracker.onReplyStart(userInput);
+        long replyStartTime = System.currentTimeMillis();
+
         // 创建上下文和事件流
         AgentContext ctx = new AgentContext(id, UUID.randomUUID().toString(), "default");
-        ctx.setReplyStartTime(System.currentTimeMillis());
+        ctx.setReplyStartTime(replyStartTime);
         EventStream eventStream = new EventStream(id);
 
         // 触发 onReplyStart
@@ -323,57 +333,184 @@ public class Agent {
 
         try {
             for (int iteration = 0; iteration < maxIterations; iteration++) {
+                log.debug("智能体 [{}] 流式第 {} 次迭代", name, iteration + 1);
+
+                // 进度跟踪：模型调用开始
+                progressTracker.onModelCallStart();
+
                 List<Msg> messages = buildMessages();
+
+                // 上下文压缩（与 reply() 一致）
+                int compactedCount = com.demo.agentscope.context.MicroCompactor.compactIfNeeded(context);
+
                 List<MCPClient.ToolInfo> tools = mcpClient.listTools();
 
                 middlewareChain.fireModelCall(ctx, new Msg(UUID.randomUUID().toString(), "user",
                         List.of(new ContentBlock.TextBlock("[流式模型调用]"))));
 
-                Msg response = chatModel.chat(providerName, messages, tools);
+                // 流式调用：通过 sink 在 SSE 读取过程中实时回显 + 累积，避免两阶段回放
+                StreamSinkSink sink = new StreamSinkSink(eventStream, progressTracker);
+                chatModel.chatStream(providerName, messages, tools, id, sink);
+                Msg response = sink.buildResponse();
+
                 middlewareChain.fireModelCallEnd(ctx, response);
                 context.add(response);
 
-                // 发射文本和思考事件
-                for (ContentBlock block : response.getContent()) {
-                    if (block instanceof ContentBlock.TextBlock textBlock) {
-                        eventStream.emit(AgentEvent.textBlock(id, textBlock.getText()));
-                    } else if (block instanceof ContentBlock.ThinkingBlock thinkingBlock) {
-                        eventStream.emit(AgentEvent.thinkingBlock(id, thinkingBlock.getText()));
-                    } else if (block instanceof ContentBlock.ToolCallBlock toolCallBlock) {
-                        Map<String, Object> args = parseToolArguments(toolCallBlock.getArguments());
-                        eventStream.emit(AgentEvent.toolCall(id, toolCallBlock.getName(), args));
-                    }
+                if (log.isInfoEnabled()) {
+                    Msg.TokenUsage usage = response.getUsage();
+                    log.info("[stream-compact] turn={} promptTokens={} completionTokens={} toolCalls={} compactedCalls={}",
+                            iteration + 1,
+                            usage != null ? usage.getPromptTokens() : 0,
+                            usage != null ? usage.getCompletionTokens() : 0,
+                            response.getToolCalls().size(), compactedCount);
                 }
 
                 if (!response.hasToolCalls()) {
+                    // 流式回复结束换行
+                    progressTracker.onStreamEnd();
                     break;
                 }
 
                 // 执行工具
                 for (ContentBlock.ToolCallBlock toolCall : response.getToolCalls()) {
+                    log.info("智能体 [{}] 调用工具: {}", name, toolCall.getName());
+                    progressTracker.onToolCall(toolCall.getName());
                     middlewareChain.fireToolCall(ctx, toolCall);
 
+                    // 权限检查（与 reply() 一致）
                     Map<String, Object> toolArgs = parseToolArguments(toolCall.getArguments());
-                    MCPClient.ToolResult toolResult = mcpClient.executeTool(toolCall.getName(), toolArgs);
+                    var decision = permissionEngine.check(toolCall.getName(), toolArgs);
+                    if (decision == com.demo.agentscope.permission.PermissionDecision.DENY) {
+                        log.warn("工具 [{}] 被权限引擎拒绝", toolCall.getName());
+                        ContentBlock.ToolResultBlock deniedResult = new ContentBlock.ToolResultBlock(
+                                toolCall.getId(), "权限拒绝: 工具 " + toolCall.getName() + " 被禁止执行", true);
+                        Msg toolResultMsg = buildToolResultMsg(deniedResult);
+                        context.add(toolResultMsg);
+                        middlewareChain.fireToolResult(ctx, deniedResult);
+                        eventStream.emit(AgentEvent.toolResult(id, toolCall.getName(), "权限拒绝"));
+                        progressTracker.onToolCallComplete(toolCall.getName(), false, 0);
+                        continue;
+                    }
 
-                    ContentBlock.ToolResultBlock resultBlock = toolResult.toToolResultBlock(toolCall.getId());
+                    long toolStartTime = System.currentTimeMillis();
+                    MCPClient.ToolResult toolResult = mcpClient.executeTool(toolCall.getName(), toolArgs);
+                    long toolDuration = System.currentTimeMillis() - toolStartTime;
+
+                    progressTracker.onToolCallComplete(toolCall.getName(), toolResult.isSuccess(), toolDuration);
+
+                    String resultContent = toolResult.isSuccess() ? toolResult.getOutput() : toolResult.getError();
+                    ContentBlock.ToolResultBlock resultBlock = new ContentBlock.ToolResultBlock(
+                            toolCall.getId(), resultContent, !toolResult.isSuccess());
                     Msg toolResultMsg = buildToolResultMsg(resultBlock);
                     context.add(toolResultMsg);
 
                     middlewareChain.fireToolResult(ctx, resultBlock);
-                    String resultContent = toolResult.isSuccess() ? toolResult.getOutput() : toolResult.getError();
                     eventStream.emit(AgentEvent.toolResult(id, toolCall.getName(), resultContent));
                 }
             }
         } catch (Exception e) {
             log.error("智能体 [{}] 流式回复异常", name, e);
+            progressTracker.onError(e.getMessage());
             eventStream.emit(AgentEvent.error(id, e.getMessage()));
         }
+
+        // 将上下文传递给中间件
+        ctx.setAttribute("contextMessages", context);
 
         middlewareChain.fireReplyEnd(ctx, eventStream);
         eventStream.emit(AgentEvent.replyEnd(id));
 
+        long replyDuration = System.currentTimeMillis() - replyStartTime;
+        progressTracker.onReplyComplete(replyDuration);
+
+        // 更新状态
+        agentState.put("lastReplyTime", Instant.now().toString());
+        agentState.put("totalIterations", (int) agentState.getOrDefault("totalIterations", 0) + 1);
+
         return eventStream;
+    }
+
+    /**
+     * 流式 SSE sink 的可变累积器：在 ChatModel 读取 SSE 流的过程中，
+     * 每收到一个事件就同时转发到外层 eventStream、推送 progressTracker 实时回显、
+     * 并累积文本/思考/工具调用，最后通过 {@link #buildResponse()} 构造 Msg。
+     * <p>
+     * 相比此前"先全部读完再回放"的 drainModelStream，此方案确保 token 级实时渲染。
+     * </p>
+     */
+    private static final class StreamSinkSink implements com.demo.agentscope.model.StreamSink {
+        private final EventStream outer;
+        private final AgentProgressTracker tracker;
+        private final StringBuilder textBuf = new StringBuilder();
+        private final StringBuilder reasoningBuf = new StringBuilder();
+        private final List<ContentBlock.ToolCallBlock> toolCalls = new ArrayList<>();
+        private int promptTokens = 0;
+        private int completionTokens = 0;
+
+        StreamSinkSink(EventStream outer, AgentProgressTracker tracker) {
+            this.outer = outer;
+            this.tracker = tracker;
+        }
+
+        @Override
+        public void onEvent(AgentEvent e) {
+            switch (e.getType()) {
+                case TEXT_DELTA -> {
+                    String delta = e.getData("delta", String.class);
+                    if (delta != null && !delta.isEmpty()) {
+                        textBuf.append(delta);
+                        tracker.onTextDelta(delta);
+                        outer.emit(e);
+                    }
+                }
+                case THINKING_DELTA -> {
+                    String delta = e.getData("delta", String.class);
+                    if (delta != null && !delta.isEmpty()) {
+                        reasoningBuf.append(delta);
+                        tracker.onThinkingDelta(delta);
+                        outer.emit(e);
+                    }
+                }
+                case TOOL_CALL -> {
+                    outer.emit(e);
+                    String name = e.getData("toolName", String.class);
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> argsMap = e.getData("arguments", Map.class);
+                    if (name != null && argsMap != null) {
+                        Object raw = argsMap.get("raw");
+                        Object id = argsMap.get("id");
+                        String argsStr = raw instanceof String s ? s : "";
+                        String callId = id instanceof String idStr ? idStr : "call_" + UUID.randomUUID();
+                        toolCalls.add(new ContentBlock.ToolCallBlock(callId, name, argsStr));
+                    }
+                }
+                case MODEL_CALL_END -> {
+                    outer.emit(e);
+                    Integer pt = e.getData("promptTokens", Integer.class);
+                    Integer ct = e.getData("completionTokens", Integer.class);
+                    if (pt != null) promptTokens = pt;
+                    if (ct != null) completionTokens = ct;
+                }
+                default -> outer.emit(e);
+            }
+        }
+
+        Msg buildResponse() {
+            List<ContentBlock> blocks = new ArrayList<>();
+            if (!textBuf.isEmpty()) {
+                blocks.add(new ContentBlock.TextBlock(textBuf.toString()));
+            }
+            if (!reasoningBuf.isEmpty()) {
+                blocks.add(new ContentBlock.ThinkingBlock(reasoningBuf.toString()));
+            }
+            blocks.addAll(toolCalls);
+
+            if (promptTokens > 0 || completionTokens > 0) {
+                tracker.onModelCallComplete(promptTokens, completionTokens);
+            }
+            Msg.TokenUsage usage = new Msg.TokenUsage(promptTokens, completionTokens);
+            return new Msg(UUID.randomUUID().toString(), "assistant", blocks, usage, Instant.now(), null);
+        }
     }
 
     // ==================== 辅助方法 ====================

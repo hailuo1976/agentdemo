@@ -177,6 +177,32 @@ public class AgentEvent {
     }
 
     /**
+     * 创建文本增量片段事件（流式）。
+     *
+     * @param agentId 智能体ID
+     * @param delta   增量文本
+     * @return 文本增量事件
+     */
+    public static AgentEvent textDelta(String agentId, String delta) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("delta", delta);
+        return create(EventType.TEXT_DELTA, data, agentId);
+    }
+
+    /**
+     * 创建思考增量片段事件（流式）。
+     *
+     * @param agentId 智能体ID
+     * @param delta   增量思考内容
+     * @return 思考增量事件
+     */
+    public static AgentEvent thinkingDelta(String agentId, String delta) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("delta", delta);
+        return create(EventType.THINKING_DELTA, data, agentId);
+    }
+
+    /**
      * 创建工具调用事件。
      *
      * @param agentId  智能体ID
