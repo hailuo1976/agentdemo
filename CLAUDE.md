@@ -1,104 +1,104 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件为 Claude Code (claude.ai/code) 在本仓库中工作时提供指引。
 
-## Project Overview
+## 项目概览
 
-This repo contains two **independent** Java 17 Agent demo applications that contrast two implementation philosophies:
+本仓库包含两个**相互独立**的 Java 17 Agent 演示应用，用于对比两种实现哲学：
 
-- **`pimono-demo/`** — Minimal hand-written Agent (~700 lines, 8 main classes). Teaching/prototype oriented. ReAct loop + OpenAI-compatible client + MCP stdio client, no framework abstractions.
-- **`agentscope-demo/`** — Full Java reimplementation of AgentScope 2.0's "六件套" architecture (~2500 lines, 30+ classes). Production-oriented: event stream, middleware onion, three-state permission engine, workspace sandbox, credential provider with failover, Leader-Worker agent teams.
+- **`pimono-demo/`** — 极简手写 Agent（约 700 行，8 个核心类）。面向教学/原型。ReAct 循环 + OpenAI 兼容客户端 + MCP stdio 客户端，不引入框架级抽象。
+- **`agentscope-demo/`** — AgentScope 2.0「六件套」架构的完整 Java 复刻（约 2500 行，30+ 个类）。面向生产：事件流、中间件洋葱模型、三态权限引擎、工作空间沙箱、带 failover 的凭证提供者、Leader-Worker 智能体团队。
 
-Both are Maven submodules under a parent POM (`com.demo:agent-demos:1.0.0`). There is **no shared library module** — common concepts (ReAct loop, LLM client, MCP) are duplicated intentionally for didactic contrast. See `ARCHITECTURE.md` for the side-by-side comparison.
+二者均为父 POM（`com.demo:agent-demos:1.0.0`）下的 Maven 子模块。**没有共享库模块** —— 通用概念（ReAct 循环、LLM 客户端、MCP）刻意保持重复，以便进行对照式教学。两个模块的并排对比见 `ARCHITECTURE.md`。
 
-## Build, Run, Test
+## 构建、运行、测试
 
-JDK 17 and Maven are vendored locally under `.tools/` (gitignored). The `start*.sh` scripts (also gitignored — they contain personal API keys) set up `JAVA_HOME`/`PATH` and launch the shaded jars.
+JDK 17 与 Maven 已本地内置于 `.tools/`（已 gitignore）。`start*.sh` 脚本（同样已 gitignore —— 内含个人 API Key）负责设置 `JAVA_HOME`/`PATH` 并启动 shaded jar。
 
 ```bash
-# Build both modules
+# 构建两个模块
 mvn clean compile
-mvn package -DskipTests        # produces agentscope-demo-1.0.0.jar / pimono-demo-1.0.0.jar (shaded)
+mvn package -DskipTests        # 产出 agentscope-demo-1.0.0.jar / pimono-demo-1.0.0.jar（shaded）
 
-# Run tests (all modules)
+# 运行测试（所有模块）
 mvn test
 
-# Run a single test class
+# 运行单个测试类
 mvn test -pl agentscope-demo -Dtest=PermissionTest
 mvn test -pl pimono-demo -Dtest=AgentCoreTest
 
-# Run a single test method
+# 运行单个测试方法
 mvn test -pl agentscope-demo -Dtest=PermissionTest#specificMethod
 ```
 
-Required env vars before running either app (read by `DefaultCredentialProvider` / `PiMonoDemoApplication`):
+运行任一应用前必需的环境变量（由 `DefaultCredentialProvider` / `PiMonoDemoApplication` 读取）：
 
-| Variable | Purpose |
+| 变量 | 用途 |
 |---|---|
-| `OPENAI_API_KEY` / `DASHSCOPE_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` | At least one required |
-| `MODEL_PROVIDER` | Auto-detected if omitted (agentscope prefers dashscope > openai) |
-| `MODEL_NAME` | e.g. `gpt-4o-mini`, `glm-5.1` |
-| `MODEL_BASE_URL` | OpenAI-compatible base URL |
-| `MCP_SERVERS` | Optional, format `command:arg1,arg2` |
-| `WORKSPACE_DIR` | Default `workspace/` (agentscope only) |
-| `REPLY_BUDGET` | Token budget cap (agentscope only) |
+| `OPENAI_API_KEY` / `DASHSCOPE_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` | 至少配置一个 |
+| `MODEL_PROVIDER` | 省略时自动检测（agentscope 优先级：dashscope > openai） |
+| `MODEL_NAME` | 如 `gpt-4o-mini`、`glm-5.1` |
+| `MODEL_BASE_URL` | OpenAI 兼容的基础 URL |
+| `MCP_SERVERS` | 可选，格式 `command:arg1,arg2` |
+| `WORKSPACE_DIR` | 默认 `workspace/`（仅 agentscope） |
+| `REPLY_BUDGET` | Token 预算上限（仅 agentscope） |
 
-Both apps are interactive REPLs — pipe a prompt via stdin or run them in a terminal.
+两个应用均为交互式 REPL —— 可通过 stdin 管道喂入提示词，或在终端中直接运行。
 
-## Architecture (Big Picture)
+## 架构（总览）
 
-### Shared Agent substrate (both modules)
+### 共享的 Agent 基底（两个模块通用）
 
-The five layers every Agent needs, and where each module implements them:
+任何 Agent 都需要的五层，以及各模块的实现位置：
 
-| Layer | pimono | agentscope |
+| 层 | pimono | agentscope |
 |---|---|---|
-| ReAct loop | `AgentCore.chat()` `while (round < MAX_TOOL_ROUNDS)` | `Agent.reply()` — loop body split across middleware hooks |
-| LLM client | `ai/LlmClient` (OkHttp + Jackson, OpenAI `/chat/completions`) | `model/ChatModel` (multi-backend) |
-| MCP client | `mcp/McpServerConnection` (JSON-RPC 2.0 over stdio) | `mcp/McpServerConnection` + `MCPClient` (declarative Stdio/Http config) |
-| Context | `context/ContextManager` FIFO sliding window (50 msgs) | `middleware/ContextCompressionMiddleware` structured compression |
-| Tool-call metadata | `Context.ToolCallEntry` | `message/ContentBlock` (6 block types incl. ToolCall/ToolResult) |
+| ReAct 循环 | `AgentCore.chat()` 的 `while (round < MAX_TOOL_ROUNDS)` | `Agent.reply()` —— 循环体拆分到各中间件 hook |
+| LLM 客户端 | `ai/LlmClient`（OkHttp + Jackson，OpenAI `/chat/completions`） | `model/ChatModel`（多后端，阻塞 + SSE 流式） |
+| MCP 客户端 | `mcp/McpServerConnection`（基于 stdio 的 JSON-RPC 2.0） | `mcp/McpServerConnection` + `MCPClient`（声明式 Stdio/Http 配置） |
+| 上下文 | `context/ContextManager` FIFO 滑动窗口（50 条消息） | `middleware/ContextCompressionMiddleware` 结构化压缩 |
+| 工具调用元数据 | `Context.ToolCallEntry` | `message/ContentBlock`（6 种块类型，含 ToolCall/ToolResult） |
 
-`tool_call_id` linkage between request and result is mandatory in both — never drop it.
+请求与结果之间的 `tool_call_id` 关联在两个模块中都是强制要求 —— 绝不可丢。
 
-### agentscope-demo layered architecture
+### agentscope-demo 分层架构
 
-Entry point: `com.demo.agentscope.AgentScopeDemoApplication`. Its `main()` is the canonical wiring example — follow that order when modifying:
+入口：`com.demo.agentscope.AgentScopeDemoApplication`。其 `main()` 是规范的装配示例 —— 改动时请按此顺序：
 
-1. **Credential** (`credential/`) — `DefaultCredentialProvider` resolves API keys via env vars, supports primary/standby failover.
-2. **MCP** (`mcp/`) — `MCPClient` aggregates builtin tools + external stdio MCP servers parsed from `MCP_SERVERS`. Also gets the file/code-execution tools registered later.
-3. **FilePermission + Workspace** (`filepermission/`, `workspace/`) — Two independent permission layers:
-   - `FilePermissionManager` (path-level, glob patterns, extension denylist, 10MB cap, default DENY_ALL) wraps `LocalWorkspace` via `SecureFileWorkspace`.
-   - `workspace/` provides `LocalWorkspace` (real) plus `DockerWorkspace` / `E2BWorkspace` (stubs) and `WorkspaceManager` for multi-tenant isolation.
-4. **Code execution** (`execution/`) — `CodeExecutionManager` runs python/shell with `CommandSafetyChecker` blocking dangerous patterns and a 30s timeout.
-5. **Permission** (`permission/`) — `PermissionEngine` chains **Rules → Mode → Built-in** (any non-ALLOW terminates). Three-state decisions: `ALLOW`/`DENY`/`ASK`. Modes: `EXPLORE` (read-only), `DONT_ASK` (ASK→DENY, the app default), `BYPASS` (skip). `PermissionMiddleware` plugs this into the middleware chain.
-6. **Agent** (`agent/Agent.java`) — unified `reply()` / `replyStream()`. `AgentTeam` gives the leader four team-management tools (`agent_create`, `agent_message`, `agent_list`, `team_dissolve`) so it dynamically spawns worker sessions rather than using a static DAG.
-7. **Middleware onion** (`middleware/`) — 6 hook points (`onReplyStart`, `onModelCall`, `onModelCallEnd`, `onToolCall`, `onToolResult`, `onReplyEnd`). Built-in: `TracingMiddleware`, `ContextCompressionMiddleware`, `PermissionMiddleware`, `ReplyBudgetControlMiddleware` (throws `BudgetExceededException`).
-8. **Events** (`event/`) — `EventStream` is the observability spine; `reply()` emits a typed, replayable sequence (`ReplyStart → ModelCall → TextBlock → ToolCall → ToolResult → ... → ReplyEnd`).
+1. **Credential**（`credential/`）—— `DefaultCredentialProvider` 通过环境变量解析 API Key，支持主备 failover。
+2. **MCP**（`mcp/`）—— `MCPClient` 聚合内置工具 + 从 `MCP_SERVERS` 解析出的外部 stdio MCP 服务器，后续也会注册文件/代码执行工具。
+3. **FilePermission + Workspace**（`filepermission/`、`workspace/`）—— 两层独立的权限：
+   - `FilePermissionManager`（路径级，glob 模式，扩展名黑名单，10MB 上限，默认 DENY_ALL）通过 `SecureFileWorkspace` 包裹 `LocalWorkspace`。
+   - `workspace/` 提供 `LocalWorkspace`（真实）以及 `DockerWorkspace` / `E2BWorkspace`（桩），并通过 `WorkspaceManager` 支持多租户隔离。
+4. **Code execution**（`execution/`）—— `CodeExecutionManager` 运行 python/shell，`CommandSafetyChecker` 拦截危险命令并设 30 秒超时。
+5. **Permission**（`permission/`）—— `PermissionEngine` 按 **Rules → Mode → Built-in** 链式判定（任一非 ALLOW 即终止）。三态决策：`ALLOW`/`DENY`/`ASK`。模式：`EXPLORE`（只读）、`DONT_ASK`（ASK→DENY，应用默认）、`BYPASS`（跳过）。`PermissionMiddleware` 把它接入中间件链。
+6. **Agent**（`agent/Agent.java`）—— 统一的 `reply()` / `replyStream()`。`AgentTeam` 为 leader 提供四个团队管理工具（`agent_create`、`agent_message`、`agent_list`、`team_dissolve`），动态拉起 worker 会话而非静态 DAG。
+7. **Middleware 洋葱模型**（`middleware/`）—— 6 个 hook 点（`onReplyStart`、`onModelCall`、`onModelCallEnd`、`onToolCall`、`onToolResult`、`onReplyEnd`）。内置：`TracingMiddleware`、`ContextCompressionMiddleware`、`PermissionMiddleware`、`ReplyBudgetControlMiddleware`（抛出 `BudgetExceededException`）。
+8. **Events**（`event/`）—— `EventStream` 是可观测性主轴；`reply()` 发射类型化的、可重放的序列（`ReplyStart → ModelCall → TextBlock → ToolCall → ToolResult → ... → ReplyEnd`）。
 
-### pimono-demo layout
+### pimono-demo 布局
 
-Entry point: `com.demo.pimono.PiMonoDemoApplication`. The whole framework fits in one screen of mental model — `AgentCore` drives the loop, `LlmClient` speaks OpenAI protocol, `ContextManager` holds one current context, `McpClientManager` ships five builtin mock tools (`get_weather`/`calculate`/`search`/`get_time`/`translate`) plus external MCP. No middleware, no events, no permission system, no sandbox — the deliberate point of comparison.
+入口：`com.demo.pimono.PiMonoDemoApplication`。整个框架能装进一屏心智模型 —— `AgentCore` 驱动循环，`LlmClient` 讲 OpenAI 协议，`ContextManager` 持有当前上下文，`McpClientManager` 内置五个 mock 工具（`get_weather`/`calculate`/`search`/`get_time`/`translate`）外加外部 MCP。无中间件、无事件、无权限系统、无沙箱 —— 这正是刻意设计的对照样本。
 
-## Conventions
+## 约定
 
-- **Logging**: SLF4J + Logback (`org.slf4j.Logger`). User-facing output goes through `ui/ConsoleUI` (ANSI colors via JLine3 terminal). Keep log/app-output separation clean.
-- **Chinese first**: System prompts, log messages, and UI strings are predominantly Simplified Chinese. Match the surrounding file's language when adding content.
-- **Tool protocol**: All tool calls (builtin or MCP) follow `{name, description, inputSchema(JSON Schema)}` and return a `tool_call_id`-keyed result. Builtin tools are registered the same way as MCP-discovered ones — there is no separate "function calling" path.
-- **No Spring**: plain `public static void main`, wired by hand. Shaded uber-jars via `maven-shade-plugin`.
-- **Compiler quirk**: parent POM passes `--add-exports java.base/sun.nio.ch=ALL-UNNAMED` — preserve this when touching the compiler config.
-- **JUnit 5 + Mockito 5** for tests; tests live under each module's `src/test/java` mirroring the main package.
+- **日志**：SLF4J + Logback（`org.slf4j.Logger`）。面向用户的输出走 `ui/ConsoleUI`（通过 JLine3 终端的 ANSI 颜色）。保持日志/应用输出分离。
+- **中文优先**：系统提示词、日志消息、UI 字符串以简体中文为主。新增内容时与所在文件的语言保持一致。
+- **工具协议**：所有工具调用（内置或 MCP）遵循 `{name, description, inputSchema(JSON Schema)}`，并返回以 `tool_call_id` 为键的结果。内置工具与 MCP 发现的工具注册方式相同 —— 没有 separate 的「function calling」路径。
+- **不使用 Spring**：纯 `public static void main`，手工装配。通过 `maven-shade-plugin` 打成 shaded uber-jar。
+- **编译器怪癖**：父 POM 传入 `--add-exports java.base/sun.nio.ch=ALL-UNNAMED` —— 改动编译配置时请保留。
+- **JUnit 5 + Mockito 5** 用于测试；测试位于各模块的 `src/test/java`，与主包结构镜像。
 
-## Key files to read first when onboarding
+## 上手时优先阅读的关键文件
 
-- `ARCHITECTURE.md` — the most important doc; side-by-side comparison of both modules and the "five universal layers" abstraction.
-- `AgentScope2.0剖析_20260626.md` — the upstream Python framework analysis that `agentscope-demo` re-implements.
-- `agentscope-demo/src/main/java/com/demo/agentscope/AgentScopeDemoApplication.java` — wiring reference for the full stack.
-- `pimono-demo/src/main/java/com/demo/pimono/agent/AgentCore.java` — 150-line Agent essence; read this first to understand what `agentscope-demo` is elaborating.
+- `ARCHITECTURE.md` —— 最重要的文档；两模块并排对比 + 「五层通用抽象」。
+- `AgentScope2.0剖析_20260626.md` —— `agentscope-demo` 所复刻的上游 Python 框架分析。
+- `agentscope-demo/src/main/java/com/demo/agentscope/AgentScopeDemoApplication.java` —— 全栈装配参考。
+- `pimono-demo/src/main/java/com/demo/pimono/agent/AgentCore.java` —— 150 行的 Agent 内核；先读它，便于理解 `agentscope-demo` 在哪些维度做扩展。
 
-## Repo notes
+## 仓库备注
 
-- `startas.sh` / `startpm.sh` are local launcher scripts containing a personal API key — they are gitignored (`start*.sh`), so do not commit them and do not assume they exist on other machines.
-- `workspace/` at the repo root is runtime scratch for the Agent (gitignored). Reports generated there are artifacts, not source.
-- `.tools/` (vendored JDK + Maven) and `.codegraph/` (CodeGraph index) are gitignored — do not stage them.
-- `project-documentation.html` is a generated artifact, also gitignored.
+- `startas.sh` / `startpm.sh` 是本地启动脚本，内含个人 API Key —— 已 gitignore（`start*.sh`），不要提交，也不要假设它们在其他机器上存在。
+- 仓库根的 `workspace/` 是 Agent 的运行时工作目录（已 gitignore）。其中生成的报告属于产物，不是源码。
+- `.tools/`（内置 JDK + Maven）和 `.codegraph/`（CodeGraph 索引）均已 gitignore —— 不要 stage。
+- `project-documentation.html` 是生成产物，也已 gitignore。
