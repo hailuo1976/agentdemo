@@ -160,21 +160,35 @@ public class LocalWorkspace implements Workspace {
     }
 
     /**
-     * 解析相对路径为绝对路径，并进行安全检查。
+     * 解析路径为绝对路径。
      * <p>
-     * 防止路径遍历攻击，确保解析后的路径仍在 baseDir 下。
+     * 支持相对路径和绝对路径：
+     * <ul>
+     *   <li>相对路径：相对于 baseDir 解析</li>
+     *   <li>绝对路径：直接使用（权限检查由 FilePermissionManager 负责）</li>
+     * </ul>
      * </p>
      *
-     * @param path 相对路径
+     * @param path 文件路径（相对或绝对）
      * @return 绝对路径
      */
     private Path resolvePath(String path) {
         Objects.requireNonNull(path, "路径不能为null");
-        Path resolved = baseDir.resolve(path).toAbsolutePath().normalize();
-
-        // 安全检查：防止路径遍历
-        if (!resolved.startsWith(baseDir)) {
-            throw new RuntimeException("路径越界: " + path + " 不在工作空间目录下");
+        
+        Path inputPath = Paths.get(path);
+        Path resolved;
+        
+        if (inputPath.isAbsolute()) {
+            // 绝对路径：直接使用
+            resolved = inputPath.toAbsolutePath().normalize();
+        } else {
+            // 相对路径：相对于 baseDir 解析
+            resolved = baseDir.resolve(path).toAbsolutePath().normalize();
+            
+            // 安全检查：防止路径遍历（仅对相对路径）
+            if (!resolved.startsWith(baseDir)) {
+                throw new RuntimeException("路径越界: " + path + " 不在工作空间目录下");
+            }
         }
 
         return resolved;
