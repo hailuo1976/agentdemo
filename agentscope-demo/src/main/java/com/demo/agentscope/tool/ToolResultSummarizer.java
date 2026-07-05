@@ -19,7 +19,7 @@ public class ToolResultSummarizer {
     private static final Logger log = LoggerFactory.getLogger(ToolResultSummarizer.class);
 
     /** 触发摘要的字符数阈值 */
-    private static final int SUMMARY_THRESHOLD = 2000;
+    private static final int SUMMARY_THRESHOLD = 3000;
 
     /** 摘要最大长度 */
     private static final int MAX_SUMMARY_LENGTH = 500;

@@ -138,13 +138,13 @@ public class ContextManager {
         }
         
         // 5. 估算token数，如果超限则进一步压缩
-        int estimatedTokens = estimateTokens(context);
+        int estimatedTokens = Msg.sumEstimatedTokens(context);
         if (estimatedTokens > MAX_CONTEXT_TOKENS) {
             log.warn("上下文token数超限: {} > {}，触发压缩", estimatedTokens, MAX_CONTEXT_TOKENS);
             context = compressContext(context);
         }
-        
-        log.debug("构建上下文完成，消息数: {}, 估算token数: {}", context.size(), estimateTokens(context));
+
+        log.debug("构建上下文完成，消息数: {}, 估算token数: {}", context.size(), Msg.sumEstimatedTokens(context));
         return context;
     }
     
@@ -198,14 +198,13 @@ public class ContextManager {
     }
     
     /**
-     * 估算token数。
+     * 估算token数:委托给 {@link Msg#sumEstimatedTokens(List)}。
+     * <p>
+     * 注意:必须把 ToolCallBlock.arguments 和 ToolResultBlock.content 一并计入,
+     * 否则工具密集对话会严重低估 —— 工具调用的 Python 脚本参数体积才是大头。
+     * </p>
      */
     private int estimateTokens(List<Msg> messages) {
-        int totalChars = 0;
-        for (Msg msg : messages) {
-            totalChars += msg.getTextContent().length();
-        }
-        // 粗略估算：1 token ≈ 4 字符（英文）或 2 字符（中文）
-        return totalChars / 3;
+        return Msg.sumEstimatedTokens(messages);
     }
 }

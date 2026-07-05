@@ -171,6 +171,12 @@ public class Agent {
                 // 构建发送给模型的消息列表
                 List<Msg> messages = buildMessages();
 
+                // 上下文压缩:工具密集对话时,把早期 tool_call.arguments / tool_result.content
+                // 替换为 stub,避免 8K+ 字符的 Python 脚本被每轮重发(参考 Claude Code microCompact)
+                // 注意:必须在 buildMessages() 之后调用 —— messages 是 context 的别名视图,
+                // 修改 context 内的 block 会被下一轮 buildMessages() 反映到请求体
+                int compactedCount = com.demo.agentscope.context.MicroCompactor.compactIfNeeded(context);
+
                 // 获取可用工具列表
                 List<MCPClient.ToolInfo> tools = mcpClient.listTools();
 
@@ -187,6 +193,11 @@ public class Agent {
                 Msg.TokenUsage usage = response.getUsage();
                 if (usage != null) {
                     progressTracker.onModelCallComplete(usage.getPromptTokens(), usage.getCompletionTokens());
+                    if (log.isInfoEnabled()) {
+                        log.info("[compact] turn={} promptTokens={} completionTokens={} toolCallsSoFar={} compactedCalls={} estimatedTokens={}",
+                                iteration + 1, usage.getPromptTokens(), usage.getCompletionTokens(),
+                                countToolCallsSoFar(context), compactedCount, Msg.sumEstimatedTokens(messages));
+                    }
                 }
 
                 // 触发 onModelCallEnd
@@ -236,9 +247,8 @@ public class Agent {
                     // 进度跟踪：工具调用完成
                     progressTracker.onToolCallComplete(toolCall.getName(), toolResult.isSuccess(), toolDuration);
 
-                    // 截断大型工具结果（特别是团队模式下的工作者回复）
+                    // 工具结果(MCPClient 内 ToolResultSummarizer 已统一对超长输出做摘要)
                     String resultContent = toolResult.isSuccess() ? toolResult.getOutput() : toolResult.getError();
-                    resultContent = truncateToolResult(resultContent, toolCall.getName());
 
                     // 构建工具结果消息
                     ContentBlock.ToolResultBlock resultBlock = new ContentBlock.ToolResultBlock(
@@ -422,43 +432,21 @@ public class Agent {
     }
 
     /**
+     * 统计 context 中累计的 ToolCallBlock 数量(用于压缩观测日志)。
+     */
+    private int countToolCallsSoFar(List<Msg> ctx) {
+        int count = 0;
+        for (Msg msg : ctx) {
+            count += msg.getToolCalls().size();
+        }
+        return count;
+    }
+
+    /**
      * 构建工具结果消息。
      */
     private Msg buildToolResultMsg(ContentBlock.ToolResultBlock resultBlock) {
         return new Msg(UUID.randomUUID().toString(), "tool", List.of(resultBlock));
-    }
-
-    /**
-     * 截断大型工具结果，防止上下文爆炸。
-     * <p>
-     * 团队模式下的工作者回复可能包含数千 token，直接注入上下文会导致内存快速膨胀。
-     * 对于 agent_message 等团队工具，将结果截断到合理长度。
-     * </p>
-     *
-     * @param content  工具结果内容
-     * @param toolName 工具名称
-     * @return 截断后的内容
-     */
-    private String truncateToolResult(String content, String toolName) {
-        if (content == null || content.isEmpty()) {
-            return content;
-        }
-
-        // 团队工具结果截断阈值（字符数）
-        int maxChars = switch (toolName) {
-            case "agent_message" -> 20000;  // 工作者回复可能较长
-            case "agent_create" -> 500;    // 创建结果较短
-            case "agent_list" -> 5000;     // 列表结果中等
-            default -> 5000;              // 其他工具
-        };
-
-        if (content.length() > maxChars) {
-            String truncated = content.substring(0, maxChars) + 
-                    "\n\n[... 内容已截断，共 " + content.length() + " 字符，保留 " + maxChars + " 字符 ...]";
-            log.debug("工具 [{}] 结果已截断: {} -> {} 字符", toolName, content.length(), maxChars);
-            return truncated;
-        }
-        return content;
     }
 
     // ==================== 状态管理 ====================
