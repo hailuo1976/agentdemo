@@ -86,6 +86,9 @@ public class ChatModel {
             try (Response response = httpClient.newCall(request).execute()) {
                 if (!response.isSuccessful()) {
                     String body = response.body() != null ? response.body().string() : "无响应体";
+                    if (response.code() >= 400 && response.code() < 500) {
+                        log.warn("LLM 4xx 拒绝, messages 序列摘要:\n{}", summarizeMessagesForLog(messages));
+                    }
                     throw new IOException("API 请求失败: status=" + response.code() + ", body=" + body);
                 }
                 String responseBody = response.body() != null ? response.body().string() : "{}";
@@ -165,6 +168,10 @@ public class ChatModel {
         try (Response response = httpClient.newCall(request).execute()) {
             if (!response.isSuccessful()) {
                 String body = response.body() != null ? response.body().string() : "无响应体";
+                // 协议拒绝时打印 messages 序列摘要，便于定位是哪条消息触发 400
+                if (response.code() >= 400 && response.code() < 500) {
+                    log.warn("LLM 4xx 拒绝, messages 序列摘要:\n{}", summarizeMessagesForLog(messages));
+                }
                 throw new IOException("API 流式请求失败: status=" + response.code() + ", body=" + body);
             }
             try (java.io.BufferedReader reader = new java.io.BufferedReader(
@@ -433,5 +440,45 @@ public class ChatModel {
 
         Msg.TokenUsage usage = new Msg.TokenUsage(promptTokens, completionTokens);
         return new Msg(UUID.randomUUID().toString(), "assistant", contentBlocks, usage, Instant.now(), null);
+    }
+
+    /**
+     * 把 messages 列表精简描述用于错误日志：
+     * 每条只显示 role + 关键 id + 内容长度，避免打印完整 prompt。
+     * 用于诊断 LLM 协议拒绝（HTTP 400 messages 参数非法）。
+     */
+    private String summarizeMessagesForLog(List<Msg> messages) {
+        if (messages == null) return "(null)";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < messages.size(); i++) {
+            Msg m = messages.get(i);
+            sb.append(String.format("[%d] role=%s", i, m.getRole()));
+            if ("assistant".equals(m.getRole()) && m.hasToolCalls()) {
+                List<String> ids = new ArrayList<>();
+                for (ContentBlock.ToolCallBlock tc : m.getToolCalls()) {
+                    ids.add(tc.getId() + ":" + tc.getName());
+                }
+                sb.append(" tool_calls=[").append(String.join(",", ids)).append("]");
+            }
+            if ("tool".equals(m.getRole())) {
+                List<String> ids = new ArrayList<>();
+                for (ContentBlock block : m.getContent()) {
+                    if (block instanceof ContentBlock.ToolResultBlock tr) {
+                        ids.add(tr.getToolCallId());
+                    }
+                }
+                sb.append(" tool_call_ids=[").append(String.join(",", ids)).append("]");
+            }
+            // 内容长度（避免打印完整 prompt）
+            int len = 0;
+            for (ContentBlock b : m.getContent()) {
+                if (b instanceof ContentBlock.TextBlock t) len += t.getText().length();
+                else if (b instanceof ContentBlock.ToolCallBlock tc) len += tc.getArguments() == null ? 0 : tc.getArguments().length();
+                else if (b instanceof ContentBlock.ToolResultBlock tr) len += tr.getContent() == null ? 0 : tr.getContent().length();
+            }
+            sb.append(" contentChars=").append(len);
+            sb.append("\n");
+        }
+        return sb.toString().stripTrailing();
     }
 }

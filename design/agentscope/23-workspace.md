@@ -95,7 +95,7 @@ pimono **无**工作空间抽象，工具直接访问宿主 FS（也没有文件
 
 - 根目录：`workspace/`（仓库根下，gitignored）
 - 子目录：每个 agent / team 各自隔离
-- 默认文件：`default.txt`（MCP 文件工具未传 path 时使用）
+- 文件路径：调用 `read_file` / `write_file` / `edit_file` 时 `path` 必填，不再提供 `default.txt` 兜底
 
 ---
 

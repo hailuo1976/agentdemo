@@ -24,9 +24,9 @@
 
 | 工具 | 行为 |
 |---|---|
-| `read_file` | 读 path（不传则 `default.txt`） |
-| `write_file` | 写 path（不传则 `default.txt`） |
-| `edit_file` | 替换 old_text → new_text |
+| `read_file` | 读 path（必填） |
+| `write_file` | 写 path（必填） |
+| `edit_file` | 替换 old_text → new_text（path 必填） |
 | `list_files` | 列目录（不传则 `.`） |
 
 **全部受 `FilePermissionManager` 管控**——`SecureFileWorkspace` 内部检查，未授权抛 `FilePermissionDeniedException`，工具捕获后转 `ToolResult` 错误输出。

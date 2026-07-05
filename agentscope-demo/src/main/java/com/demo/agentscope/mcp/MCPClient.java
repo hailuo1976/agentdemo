@@ -143,15 +143,12 @@ public class MCPClient {
     public void registerFileTools(SecureFileWorkspace fileWorkspace) {
         this.fileWorkspace = Objects.requireNonNull(fileWorkspace, "文件工作空间不能为null");
 
-        // 默认文件名：LLM 未传 path 时使用，避免空路径触发权限拒绝
-        final String DEFAULT_FILE = "default.txt";
         final String DEFAULT_DIR = ".";
 
         String readFileParams = """
-                {"type":"object","properties":{"path":{"type":"string","description":"要读取的文件路径（相对于工作空间根目录，不传则读取 default.txt）"}},"required":[]}""";
+                {"type":"object","properties":{"path":{"type":"string","description":"要读取的文件路径（相对于工作空间根目录，必填）"}},"required":["path"]}""";
         registerBuiltin("read_file", "读取指定路径的文件内容", readFileParams, (args) -> {
-            String raw = String.valueOf(args.getOrDefault("path", ""));
-            String path = raw == null || raw.isBlank() ? DEFAULT_FILE : raw;
+            String path = requireFilePath(args, "read_file");
             try {
                 return fileWorkspace.readFile(path);
             } catch (com.demo.agentscope.filepermission.FilePermissionDeniedException e) {
@@ -160,10 +157,9 @@ public class MCPClient {
         });
 
         String writeFileParams = """
-                {"type":"object","properties":{"path":{"type":"string","description":"要写入的文件路径（不传则写入 default.txt）"},"content":{"type":"string","description":"文件内容"}},"required":["content"]}""";
+                {"type":"object","properties":{"path":{"type":"string","description":"要写入的文件路径（必填）"},"content":{"type":"string","description":"文件内容"}},"required":["path","content"]}""";
         registerBuiltin("write_file", "将内容写入指定路径的文件", writeFileParams, (args) -> {
-            String raw = String.valueOf(args.getOrDefault("path", ""));
-            String path = raw == null || raw.isBlank() ? DEFAULT_FILE : raw;
+            String path = requireFilePath(args, "write_file");
             String content = String.valueOf(args.getOrDefault("content", ""));
             try {
                 fileWorkspace.writeFile(path, content);
@@ -174,10 +170,9 @@ public class MCPClient {
         });
 
         String editFileParams = """
-                {"type":"object","properties":{"path":{"type":"string","description":"要编辑的文件路径（不传则编辑 default.txt）"},"old_text":{"type":"string","description":"要替换的旧文本"},"new_text":{"type":"string","description":"替换后的新文本"}},"required":["old_text","new_text"]}""";
+                {"type":"object","properties":{"path":{"type":"string","description":"要编辑的文件路径（必填）"},"old_text":{"type":"string","description":"要替换的旧文本"},"new_text":{"type":"string","description":"替换后的新文本"}},"required":["path","old_text","new_text"]}""";
         registerBuiltin("edit_file", "编辑文件，替换指定文本", editFileParams, (args) -> {
-            String raw = String.valueOf(args.getOrDefault("path", ""));
-            String path = raw == null || raw.isBlank() ? DEFAULT_FILE : raw;
+            String path = requireFilePath(args, "edit_file");
             String oldText = String.valueOf(args.getOrDefault("old_text", ""));
             String newText = String.valueOf(args.getOrDefault("new_text", ""));
             try {
@@ -201,7 +196,26 @@ public class MCPClient {
             }
         });
 
-        log.info("已注册 4 个文件读写工具（受权限管控，未传 path 时使用默认位置）");
+        log.info("已注册 4 个文件读写工具（受权限管控，path 必填）");
+    }
+
+    /**
+     * 从工具调用参数中提取必填的 path，缺失或空则抛出明确异常。
+     * <p>
+     * 早先版本未传 path 时回退到 {@code default.txt}，会让 LLM 误以为不指定文件名也能工作，
+     * 并把数据无声地写到不可预测的位置。此方法强制要求显式文件名。
+     * </p>
+     */
+    private static String requireFilePath(java.util.Map<String, Object> args, String toolName) {
+        Object raw = args.get("path");
+        if (raw == null) {
+            throw new RuntimeException(toolName + " 缺少必填参数 path：必须明确指定文件名");
+        }
+        String path = String.valueOf(raw).trim();
+        if (path.isBlank() || "null".equals(path)) {
+            throw new RuntimeException(toolName + " 的 path 参数不能为空：必须明确指定文件名");
+        }
+        return path;
     }
 
     /**

@@ -140,8 +140,37 @@ public class ContextManager {
         // 5. 估算token数，如果超限则进一步压缩
         int estimatedTokens = Msg.sumEstimatedTokens(context);
         if (estimatedTokens > MAX_CONTEXT_TOKENS) {
+            int preCount = context.size();
             log.warn("上下文token数超限: {} > {}，触发压缩", estimatedTokens, MAX_CONTEXT_TOKENS);
-            context = compressContext(context);
+            List<Msg> compressed = compressContext(context);
+
+            // 把压缩后的非 system 消息回写到源历史列表（即 Agent.context），
+            // 让下一轮 buildContext 从压缩后状态开始，而不是反复从原始超长历史重压。
+            // 参考 Claude Code compact_boundary 思路：压缩后只保留 boundary 之后的消息。
+            if (conversationHistory != null) {
+                List<Msg> historySurvivors = new ArrayList<>();
+                for (Msg m : compressed) {
+                    if (!"system".equals(m.getRole())) {
+                        historySurvivors.add(m);
+                    }
+                }
+                conversationHistory.clear();
+                conversationHistory.addAll(historySurvivors);
+            }
+
+            // 告知模型上下文已被压缩，避免它对早期信息缺失产生误判。
+            // 参考 Claude Code 的 getCompactUserSummaryMessage：注入一条 user 角色说明消息。
+            // 不调用额外 LLM 做摘要（成本/延迟考量），只声明窗口外消息已被丢弃。
+            int totalDropped = preCount - compressed.size();
+            Msg compactNotice = new Msg(
+                UUID.randomUUID().toString(),
+                "user",
+                List.of(new ContentBlock.TextBlock(buildCompactNotice(totalDropped, compressed.size())))
+            );
+            compressed.add(1, compactNotice);  // 插在 system 之后、其它消息之前
+
+            context = compressed;
+            log.info("已注入压缩提示消息（被丢弃 {} 条，保留 {} 条）", totalDropped, compressed.size());
         }
 
         log.debug("构建上下文完成，消息数: {}, 估算token数: {}", context.size(), Msg.sumEstimatedTokens(context));
@@ -150,29 +179,132 @@ public class ContextManager {
     
     /**
      * 压缩上下文。
+     * <p>
+     * 策略：保留 system 消息 + 最近 N 条非 system 消息，但必须保证
+     * tool_call ↔ tool_result <b>双向</b>配对完整。OpenAI/GLM 协议要求：
+     * <ul>
+     *   <li>每个 assistant.tool_calls[*].id 必须有对应的 tool 结果消息存在</li>
+     *   <li>每个 tool 消息必须引用窗口内某个 assistant 的 tool_call.id</li>
+     * </ul>
+     * 任一方向切断都会触发 HTTP 400 "messages 参数非法"。
+     * 单向检查（只丢弃孤儿 tool）不足以应对 assistant 携带多个 tool_call
+     * 但窗口只保留了部分结果的情形。
+     * </p>
      */
     private List<Msg> compressContext(List<Msg> context) {
-        // 简单策略：保留系统消息和最近的消息
         List<Msg> compressed = new ArrayList<>();
-        
+
         // 保留系统消息
         for (Msg msg : context) {
             if ("system".equals(msg.getRole())) {
                 compressed.add(msg);
             }
         }
-        
-        // 保留最近的消息
+
+        // 计算窗口起点
         int recentCount = Math.min(MAX_RECENT_MESSAGES, context.size());
         int startIndex = Math.max(0, context.size() - recentCount);
+
+        // 钉住最近的 user 消息：GLM/OpenAI 协议要求 messages 序列必须含 user 角色。
+        // 多轮工具调用会让 user 消息被挤出最近 N 条窗口，压缩后会变成
+        // system→assistant→tool→... 的非法序列，触发 HTTP 400 "messages 参数非法"。
+        // 此时把窗口外最近的一条 user 消息钉在窗口之前，保证序列合法。
+        boolean hasUserInWindow = false;
         for (int i = startIndex; i < context.size(); i++) {
-            Msg msg = context.get(i);
-            if (!"system".equals(msg.getRole())) {
-                compressed.add(msg);
+            if ("user".equals(context.get(i).getRole())) {
+                hasUserInWindow = true;
+                break;
             }
         }
-        
-        log.info("压缩上下文，从 {} 条压缩到 {} 条", context.size(), compressed.size());
+        Msg pinnedUser = null;
+        if (!hasUserInWindow) {
+            for (int i = startIndex - 1; i >= 0; i--) {
+                if ("user".equals(context.get(i).getRole())) {
+                    pinnedUser = context.get(i);
+                    break;
+                }
+            }
+            if (pinnedUser != null) {
+                compressed.add(pinnedUser);
+            }
+        }
+
+        // 第一遍：收集窗口内 tool_call_id → tool 消息索引（取首次出现位置）
+        java.util.Map<String, Integer> toolResultIdxByCallId = new java.util.HashMap<>();
+        for (int i = startIndex; i < context.size(); i++) {
+            Msg msg = context.get(i);
+            if ("tool".equals(msg.getRole())) {
+                for (ContentBlock block : msg.getContent()) {
+                    if (block instanceof ContentBlock.ToolResultBlock tr) {
+                        if (tr.getToolCallId() != null
+                                && !toolResultIdxByCallId.containsKey(tr.getToolCallId())) {
+                            toolResultIdxByCallId.put(tr.getToolCallId(), i);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 第二遍：判定哪些 assistant 是"完整"的（所有 tool_calls 都有窗口内的 tool 结果），
+        // 同时建立 tool_call_id → assistant 索引映射，用于 tool 消息的反向校验
+        java.util.Set<Integer> completeAssistantIndices = new java.util.HashSet<>();
+        java.util.Map<String, Integer> assistantIdxByToolCallId = new java.util.HashMap<>();
+        for (int i = startIndex; i < context.size(); i++) {
+            Msg msg = context.get(i);
+            if ("assistant".equals(msg.getRole()) && msg.hasToolCalls()) {
+                boolean allSatisfied = true;
+                for (ContentBlock.ToolCallBlock tc : msg.getToolCalls()) {
+                    assistantIdxByToolCallId.put(tc.getId(), i);
+                    if (!toolResultIdxByCallId.containsKey(tc.getId())) {
+                        allSatisfied = false;
+                    }
+                }
+                if (allSatisfied) {
+                    completeAssistantIndices.add(i);
+                }
+            }
+        }
+
+        // 第三遍：输出。assistant 完整才保留；tool 消息的对应 assistant 完整才保留
+        int droppedIncomplete = 0;
+        int droppedOrphans = 0;
+        for (int i = startIndex; i < context.size(); i++) {
+            Msg msg = context.get(i);
+            if ("system".equals(msg.getRole())) {
+                continue;  // 已在 compressed 头部添加
+            }
+            if ("assistant".equals(msg.getRole()) && msg.hasToolCalls()) {
+                if (completeAssistantIndices.contains(i)) {
+                    compressed.add(msg);
+                } else {
+                    droppedIncomplete++;
+                }
+                continue;
+            }
+            if ("tool".equals(msg.getRole())) {
+                boolean keepTool = false;
+                for (ContentBlock block : msg.getContent()) {
+                    if (block instanceof ContentBlock.ToolResultBlock tr) {
+                        Integer assistantIdx = assistantIdxByToolCallId.get(tr.getToolCallId());
+                        if (assistantIdx != null && completeAssistantIndices.contains(assistantIdx)) {
+                            keepTool = true;
+                            break;
+                        }
+                    }
+                }
+                if (keepTool) {
+                    compressed.add(msg);
+                } else {
+                    droppedOrphans++;
+                }
+                continue;
+            }
+            compressed.add(msg);
+        }
+
+        log.info("压缩上下文，从 {} 条压缩到 {} 条（丢弃 {} 条不完整 assistant，{} 条孤儿 tool 消息{}）",
+                context.size(), compressed.size(), droppedIncomplete, droppedOrphans,
+                pinnedUser != null ? "，钉住 1 条窗口外 user 消息" : "");
         return compressed;
     }
     
@@ -182,7 +314,7 @@ public class ContextManager {
     private String formatMemoryAsText(MemoryEntry memory, String memoryType) {
         StringBuilder sb = new StringBuilder();
         sb.append("[").append(memoryType).append("记忆]\n");
-        
+
         MemoryEntry.MemoryContent content = memory.getContent();
         sb.append("摘要: ").append(content.getSummary()).append("\n");
 
@@ -195,6 +327,28 @@ public class ContextManager {
         }
 
         return sb.toString();
+    }
+
+    /**
+     * 构建注入到上下文的压缩告知文本。
+     * <p>
+     * 当 {@link #compressContext} 丢弃消息后，模型对早期对话一无所知，容易产生
+     * 信息偏差（误以为没说过某事 / 重复问已确认过的细节）。注入一条 user 角色
+     * 的说明消息，明确告诉模型：上文已因窗口限制被裁剪，如需具体细节请询问用户。
+     * </p>
+     * <p>
+     * 参考 Claude Code {@code getCompactUserSummaryMessage} 的设计：用 user 角色
+     * 承载压缩告知，与正常对话消息同序存在，避免模型把说明当成系统约束。
+     * 不同之处：本实现不调用额外 LLM 生成摘要（成本/延迟考量），仅声明裁剪事实。
+     * </p>
+     *
+     * @param droppedMessages 被丢弃的消息数
+     * @param keptMessages    保留的消息数（含 system）
+     */
+    private static String buildCompactNotice(int droppedMessages, int keptMessages) {
+        return "（系统提示：上文的 " + droppedMessages + " 条较早对话消息已因上下文窗口限制被压缩丢弃，"
+                + "当前仅保留最近的 " + keptMessages + " 条消息。如需引用更早的具体内容（代码片段、"
+                + "错误信息、用户已确认的细节等），请明确向我询问，我会重新提供。）";
     }
     
     /**
