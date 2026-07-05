@@ -2,6 +2,7 @@ package com.demo.agentscope;
 
 import com.demo.agentscope.agent.Agent;
 import com.demo.agentscope.agent.AgentTeam;
+import com.demo.agentscope.agent.SystemPrompts;
 import com.demo.agentscope.cache.IntermediateResultManager;
 import com.demo.agentscope.context.ContextManager;
 import com.demo.agentscope.credential.CredentialProvider;
@@ -102,21 +103,19 @@ public class AgentScopeDemoApplication {
         StringBuilder sb = new StringBuilder();
         sb.append("""
                 你是 AgentScope 2.0 智能体助手。你可以通过调用工具来帮助用户完成各种任务。
-                可用工具包括：
-                - read_file: 读取文件内容（参数: path）
-                - write_file: 写入文件（参数: path, content）
-                - edit_file: 编辑文件（参数: path, old_text, new_text）
-                - list_files: 列出目录内容（参数: dir）
-                - execute_python: 执行 Python 代码并返回结果（参数: code，支持多行）
-                - execute_command: 执行 Shell 命令并返回结果（参数: command）
-                - install_package: 通过 pip 安装 Python 第三方库（参数: package）
 
-                在回答问题时，如果需要获取实时信息或执行操作，请优先使用可用的工具。
-                当用户要求读取或写入文件时，使用对应的文件工具。
-                当需要计算、数据处理、网络请求或运行脚本时，使用 execute_python 执行代码并直接返回结果，不要只写代码让用户自己跑。
-                当执行失败时，请分析错误原因，修正代码后重试。
-                文件操作受权限管控，只能访问授权目录下的文件。
-                代码执行受安全策略限制（禁止危险命令、30秒超时）。
+                """);
+        sb.append(SystemPrompts.TOOL_CALL_NORMS);
+        sb.append("""
+
+                ## 工作守则
+
+                1. 需要文件操作时，永远显式指定 path，绝不省略。如果用户未给路径，根据任务上下文推断一个有意义的文件名。
+                2. 当用户要求读取或写入文件时，使用对应的文件工具。
+                3. 当需要计算、数据处理、网络请求或运行脚本时，使用 execute_python 执行代码并直接返回结果，不要只写代码让用户自己跑。
+                4. 当执行失败时，请分析错误原因，修正代码后重试，不要无脑重试。
+                5. 文件操作受权限管控，只能访问授权目录下的文件。
+                6. 代码执行受安全策略限制（禁止危险命令、30秒超时）。
                 """);
         if (stockEnabled) {
             sb.append(STOCK_PROMPT_ADDENDUM);

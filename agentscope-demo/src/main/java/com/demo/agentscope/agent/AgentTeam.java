@@ -77,6 +77,24 @@ public class AgentTeam {
     private final TeamDissolutionPermissionService dissolutionPermissionService;
 
     /**
+     * 工作者系统提示词前置基础规范：注入 {@link SystemPrompts#TOOL_CALL_NORMS} 与 worker 专属工作守则，
+     * 弥补 leader LLM 生成 prompt 时漏掉的 path 必填等工具调用硬性约束。
+     */
+    private static final String WORKER_BASELINE_PROMPT = """
+            你是一个智能体工作者，与团队领导者协作完成任务。
+
+            """
+            + SystemPrompts.TOOL_CALL_NORMS + """
+
+            ## 工作守则
+
+            1. 需要文件操作时，永远显式指定 path，绝不省略。如果用户未给路径，根据任务上下文推断一个有意义的文件名。
+            2. 优先使用工具解决问题，而非请求用户手动操作。
+            3. 失败时分析错误并修正，不要无脑重试。
+            4. 完成任务后用简洁中文总结结果。
+            """;
+
+    /**
      * 构造智能体团队。
      *
      * @param leader            领导者智能体
@@ -172,14 +190,16 @@ public class AgentTeam {
         // 为工作者创建独立的 MCPClient，不包含团队管理工具
         MCPClient workerMcpClient = new MCPClient();
         workerMcpClient.initialize();
-        
+
         // 从领导者的 MCPClient 复制工具，排除团队管理工具
         Set<String> teamTools = Set.of("agent_create", "agent_message", "agent_list", "team_dissolve", "agent_message_parallel");
         mcpClient.copyToolsTo(workerMcpClient, teamTools);
 
+        String workerSystemPrompt = WORKER_BASELINE_PROMPT + "\n\n" + systemPrompt;
+
         Agent worker = new Agent(
                 name,
-                systemPrompt,
+                workerSystemPrompt,
                 chatModel,
                 workerMcpClient,  // 使用独立的 MCPClient
                 credentialProvider,
@@ -218,7 +238,7 @@ public class AgentTeam {
         progressTracker.onWorkerStart(workerName, message);
 
         long startTime = System.currentTimeMillis();
-        Msg reply = worker.reply(message);
+        Msg reply = worker.replySyncFromStream(message);
 
         long duration = System.currentTimeMillis() - startTime;
         progressTracker.onWorkerComplete(workerName, true, duration);

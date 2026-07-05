@@ -299,6 +299,28 @@ public class Agent {
     }
 
     /**
+     * 流式回复的同步包装：调用 {@link #replyStream}，完成后返回最终 assistant 消息。
+     *
+     * @param userInput 用户输入文本
+     * @return 最终 assistant 回复消息
+     * @throws IllegalStateException 若 {@link #replyStream} 未向 context 追加 assistant 消息（异常路径）
+     */
+    public Msg replySyncFromStream(String userInput) {
+        int contextSizeBefore = context.size();
+        replyStream(userInput);
+        // 不扫描历史：避免误取前一轮残留的 assistant 消息
+        for (int i = context.size() - 1; i >= contextSizeBefore; i--) {
+            Msg m = context.get(i);
+            if ("assistant".equals(m.getRole())) {
+                return m;
+            }
+        }
+        throw new IllegalStateException(
+                "replyStream 未追加 assistant 消息：contextSizeBefore=" + contextSizeBefore
+                        + ", contextSizeAfter=" + context.size());
+    }
+
+    /**
      * 流式回复，边执行边发射事件。
      * <p>
      * 调用真实的 SSE 流式 API（{@link ChatModel#chatStream}），token 级实时回显。
