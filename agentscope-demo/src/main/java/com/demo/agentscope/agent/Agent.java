@@ -243,7 +243,7 @@ public class Agent {
                     Map<String, Object> toolArgs = parseToolArguments(toolCall.getArguments());
                     var decision = permissionEngine.check(toolCall.getName(), toolArgs);
                     if (decision.isDenied()) {
-                        handlePermissionDenied(ctx, toolCall, decision.getReason());
+                        handlePermissionDenied(ctx, toolCall, decision.getReason(), eventStream);
                         continue;
                     }
 
@@ -434,7 +434,7 @@ public class Agent {
                     Map<String, Object> toolArgs = parseToolArguments(toolCall.getArguments());
                     var decision = permissionEngine.check(toolCall.getName(), toolArgs);
                     if (decision.isDenied()) {
-                        handlePermissionDenied(ctx, toolCall, decision.getReason());
+                        handlePermissionDenied(ctx, toolCall, decision.getReason(), eventStream);
                         continue;
                     }
 
@@ -725,7 +725,8 @@ public class Agent {
      */
     private void handlePermissionDenied(AgentContext ctx,
                                         ContentBlock.ToolCallBlock toolCall,
-                                        String reason) {
+                                        String reason,
+                                        EventStream eventStream) {
         log.warn("工具 [{}] 被权限引擎拒绝: {}", toolCall.getName(), reason);
         String denyMsg = String.format(
                 "权限拒绝: 工具 %s 被禁止执行。原因：%s。\n" +

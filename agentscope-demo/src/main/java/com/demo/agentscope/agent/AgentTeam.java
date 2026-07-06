@@ -6,6 +6,11 @@ import com.demo.agentscope.message.ContentBlock;
 import com.demo.agentscope.message.Msg;
 import com.demo.agentscope.model.ChatModel;
 import com.demo.agentscope.permission.PermissionEngine;
+import com.demo.agentscope.team.Artifact;
+import com.demo.agentscope.team.ArtifactContent;
+import com.demo.agentscope.team.ArtifactException;
+import com.demo.agentscope.team.ArtifactManager;
+import com.demo.agentscope.team.ArtifactSummary;
 import com.demo.agentscope.team.SharedKnowledgeBase;
 import com.demo.agentscope.team.TeamDissolutionPermissionService;
 import com.demo.agentscope.ui.TeamProgressTracker;
@@ -14,6 +19,8 @@ import com.demo.agentscope.workspace.WorkspaceManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -77,6 +84,18 @@ public class AgentTeam {
     private final TeamDissolutionPermissionService dissolutionPermissionService;
 
     /**
+     * 团队 artifact 管理服务（可选）。非 null 时，4 个 artifact 工具会被注册到 leader，
+     * 并通过 worker MCPClient 克隆流到 worker。
+     */
+    private ArtifactManager artifactManager;
+
+    /**
+     * 当前正在调度 worker 的 agent 名字（worker 自己的名字；leader 调用工具时为 leader 名字）。
+     * artifact 工具据此识别 sender / requester。
+     */
+    private final ThreadLocal<String> currentAgentName = new ThreadLocal<>();
+
+    /**
      * 工作者系统提示词前置基础规范：注入 {@link SystemPrompts#TOOL_CALL_NORMS} 与 worker 专属工作守则，
      * 弥补 leader LLM 生成 prompt 时漏掉的 path 必填等工具调用硬性约束。
      */
@@ -92,6 +111,11 @@ public class AgentTeam {
             2. 优先使用工具解决问题，而非请求用户手动操作。
             3. 失败时分析错误并修正，不要无脑重试。
             4. 完成任务后用简洁中文总结结果。
+
+            ## 重要产出共享
+            当被要求产出代码、报告、JSON、CSV、Markdown 等结构化内容时，**优先**调用 share_file 把结果作为文件发送给请求者，而不是塞进 agent_message 的纯文本（长内容会被截断、二进制完全无法传）。
+            完成后通过 agent_message 告知接收者 artifactId，让其用 get_artifact 取回。
+            工具调用时系统会自动识别你的名字，作为 sender。
             """;
 
     /**
@@ -109,7 +133,7 @@ public class AgentTeam {
                      CredentialProvider credentialProvider, PermissionEngine permissionEngine,
                      WorkspaceManager workspaceManager, String providerName) {
         this(leader, chatModel, mcpClient, credentialProvider, permissionEngine,
-                workspaceManager, providerName, null);
+                workspaceManager, providerName, null, null);
     }
 
     /**
@@ -128,6 +152,28 @@ public class AgentTeam {
                      CredentialProvider credentialProvider, PermissionEngine permissionEngine,
                      WorkspaceManager workspaceManager, String providerName,
                      TeamDissolutionPermissionService dissolutionPermissionService) {
+        this(leader, chatModel, mcpClient, credentialProvider, permissionEngine,
+                workspaceManager, providerName, dissolutionPermissionService, null);
+    }
+
+    /**
+     * 构造智能体团队（带解散权限控制 + artifact 管理服务）。
+     *
+     * @param leader                       领导者智能体
+     * @param chatModel                    聊天模型客户端
+     * @param mcpClient                    MCP 客户端
+     * @param credentialProvider           凭证提供者
+     * @param permissionEngine             权限引擎
+     * @param workspaceManager             工作空间管理器
+     * @param providerName                 提供商名称
+     * @param dissolutionPermissionService 团队解散权限控制服务（可选）
+     * @param artifactManager              artifact 管理服务（可选，null 时不注册 artifact 工具）
+     */
+    public AgentTeam(Agent leader, ChatModel chatModel, MCPClient mcpClient,
+                     CredentialProvider credentialProvider, PermissionEngine permissionEngine,
+                     WorkspaceManager workspaceManager, String providerName,
+                     TeamDissolutionPermissionService dissolutionPermissionService,
+                     ArtifactManager artifactManager) {
         this.teamId = UUID.randomUUID().toString();
         this.leader = leader;
         this.workers = new LinkedHashMap<>();
@@ -140,8 +186,10 @@ public class AgentTeam {
         this.providerName = providerName;
         this.progressTracker = new TeamProgressTracker(teamId, leader.getName(), VerbosityLevel.fromEnv());
         this.dissolutionPermissionService = dissolutionPermissionService;
+        this.artifactManager = artifactManager;
 
-        log.info("智能体团队已创建: teamId={}, leader={}", teamId, leader.getName());
+        log.info("智能体团队已创建: teamId={}, leader={}, artifact={}",
+                teamId, leader.getName(), artifactManager != null ? "enabled" : "disabled");
     }
 
     // ==================== 核心方法 ====================
@@ -239,6 +287,8 @@ public class AgentTeam {
         boolean success = true;
         Msg reply;
         try {
+            // 设置 ThreadLocal，让 worker 调用的 artifact 工具能识别当前 worker 名字
+            currentAgentName.set(workerName);
             reply = worker.replySyncFromStream(message);
         } catch (Exception e) {
             success = false;
@@ -246,6 +296,8 @@ public class AgentTeam {
             reply = Msg.assistantText(String.format(
                     "工作者 %s 执行过程中发生异常：%s。任务未完成，请重新分配或调整指令。",
                     workerName, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+        } finally {
+            currentAgentName.remove();
         }
 
         long duration = System.currentTimeMillis() - startTime;
@@ -335,6 +387,9 @@ public class AgentTeam {
         workers.clear();
         active = false;
         workerExecutor.shutdownNow();
+        if (artifactManager != null) {
+            artifactManager.archiveAll(Instant.now());
+        }
         log.info("团队 [{}] 已解散", teamId);
     }
 
@@ -466,7 +521,194 @@ public class AgentTeam {
 
         // 将团队工具描述注入领导者系统提示词
         leader.appendToSystemPrompt(getTeamToolsDescription());
-        log.info("团队 [{}] 已注册 5 个团队工具并更新领导者提示词", teamId);
+        int toolCount = 5;
+        if (artifactManager != null) {
+            registerArtifactTools();
+            toolCount += 4;
+        }
+        log.info("团队 [{}] 已注册 {} 个团队工具并更新领导者提示词", teamId, toolCount);
+    }
+
+    // ==================== Artifact 工具注册 ====================
+
+    /**
+     * 注册 4 个 artifact 团队工具：share_file / list_artifacts / get_artifact / mark_artifact_read。
+     * 通过 leader 的 MCPClient 注册；worker 通过 copyToolsTo 自动获得（excludeTools 集合不包含这 4 个工具）。
+     * <p>
+     * 工具内通过 currentAgentName ThreadLocal 识别调用者：
+     * <ul>
+     *   <li>leader 直接调用时，ThreadLocal 未设置 → 默认 leader.getName()</li>
+     *   <li>worker 调用时，sendMessageToWorker 已经把 workerName set 进 ThreadLocal</li>
+     * </ul>
+     * </p>
+     */
+    private void registerArtifactTools() {
+        // share_file —— 发送文件
+        String shareFileParams = """
+                {"type":"object","properties":{"filename":{"type":"string","description":"原始文件名（含扩展），扩展名必须在白名单：txt/md/json/csv/py/java/js/ts/go/sh/yaml/yml/xml/html/png/jpg/jpeg/gif/pdf/log"},"recipients":{"type":"array","items":{"type":"string"},"minItems":1,"description":"接收者 agentName 列表；'leader' 表示领导者"},"content":{"type":"string","description":"文件内容（UTF-8 文本或 base64 编码的二进制，由 encoding 字段决定）"},"encoding":{"type":"string","enum":["utf8","base64"],"default":"utf8"},"mimeType":{"type":"string","description":"可选 mime 类型；省略时按扩展名推断"},"description":{"type":"string","description":"对产出内容的简要描述（建议 ≤200 字）"},"tags":{"type":"array","items":{"type":"string"},"description":"可选标签"}},"required":["filename","recipients","content"]}""";
+        mcpClient.registerCustomTool("share_file",
+                "将一份产出以文件形式发送给团队内其他成员。文件内容、校验和、元数据会被持久化；接收方可通过 get_artifact 读取。状态自动初始化为 SENT。",
+                shareFileParams,
+                (args) -> {
+                    String sender = resolveCurrentAgent();
+                    String filename = String.valueOf(args.getOrDefault("filename", ""));
+                    @SuppressWarnings("unchecked")
+                    List<Object> recipsObj = (List<Object>) args.getOrDefault("recipients", Collections.emptyList());
+                    if (recipsObj.isEmpty()) {
+                        return "错误: recipients 不能为空";
+                    }
+                    List<String> recipients = new ArrayList<>();
+                    for (Object o : recipsObj) {
+                        recipients.add(String.valueOf(o));
+                    }
+                    String encoding = String.valueOf(args.getOrDefault("encoding", "utf8"));
+                    String contentStr = String.valueOf(args.getOrDefault("content", ""));
+                    byte[] content;
+                    try {
+                        content = decodeContent(contentStr, encoding);
+                    } catch (IllegalArgumentException e) {
+                        return "错误: " + e.getMessage();
+                    }
+                    if (content.length == 0) {
+                        return "错误: content 不能为空";
+                    }
+                    String mimeType = args.containsKey("mimeType") ? String.valueOf(args.get("mimeType")) : null;
+                    String description = args.containsKey("description") ? String.valueOf(args.get("description")) : null;
+                    @SuppressWarnings("unchecked")
+                    List<String> tags = (List<String>) args.get("tags");
+                    try {
+                        Artifact a = artifactManager.send(sender, recipients, filename, mimeType,
+                                content, description, tags);
+                        return String.format("已发送 artifact: %s%n文件名: %s%n大小: %d bytes%n校验和: %s%n接收者: %s%n状态: 全部 SENT",
+                                a.getArtifactId(), a.getFilename(), a.getSizeBytes(),
+                                a.getChecksum(), a.getRecipients());
+                    } catch (ArtifactException e) {
+                        return "错误: " + e.getMessage();
+                    }
+                });
+
+        // list_artifacts —— 列出可见 artifact
+        String listArtifactsParams = """
+                {"type":"object","properties":{"status":{"type":"string","enum":["SENT","RECEIVED","READ"],"description":"可选，按状态过滤"},"tag":{"type":"string","description":"可选，按标签过滤"},"sender":{"type":"string","description":"可选，按发送者过滤"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20}},"required":[]}""";
+        mcpClient.registerCustomTool("list_artifacts",
+                "列出当前调用者可见的 artifact（作为 sender 或 recipient）。支持按状态、标签、发送者过滤。",
+                listArtifactsParams,
+                (args) -> {
+                    String requester = resolveCurrentAgent();
+                    ArtifactManager.ArtifactFilter filter = new ArtifactManager.ArtifactFilter();
+                    if (args.containsKey("status")) filter.status(String.valueOf(args.get("status")));
+                    if (args.containsKey("tag")) filter.tag(String.valueOf(args.get("tag")));
+                    if (args.containsKey("sender")) filter.sender(String.valueOf(args.get("sender")));
+                    if (args.containsKey("limit")) {
+                        try {
+                            filter.limit(Integer.parseInt(String.valueOf(args.get("limit"))));
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                    List<ArtifactSummary> list = artifactManager.list(requester, filter);
+                    if (list.isEmpty()) {
+                        return "没有可见的 artifact";
+                    }
+                    StringBuilder sb = new StringBuilder("| ID | 文件名 | 发送者 | 大小 | 状态(对你) | 创建时间 |\\n");
+                    sb.append("|----|--------|--------|------|-----------|----------|\\n");
+                    for (ArtifactSummary s : list) {
+                        sb.append(String.format("| %s | %s | %s | %d | %s | %s |\\n",
+                                s.getArtifactId(),
+                                s.getFilename(),
+                                s.getSender(),
+                                s.getSizeBytes(),
+                                s.getStatus(),
+                                s.getCreatedAt() != null ? s.getCreatedAt().toString().substring(0, 16) : "-"));
+                    }
+                    return sb.toString().trim();
+                });
+
+        // get_artifact —— 接收文件
+        String getArtifactParams = """
+                {"type":"object","properties":{"artifactId":{"type":"string","description":"artifact ID"},"encoding":{"type":"string","enum":["utf8","base64"],"default":"utf8","description":"返回内容的编码；二进制建议 base64"}},"required":["artifactId"]}""";
+        mcpClient.registerCustomTool("get_artifact",
+                "读取一个 artifact 的内容。仅对 recipient 或 sender 可用；自动校验 sha256；成功后状态推进为 RECEIVED。",
+                getArtifactParams,
+                (args) -> {
+                    String requester = resolveCurrentAgent();
+                    String artifactId = String.valueOf(args.getOrDefault("artifactId", ""));
+                    String encoding = String.valueOf(args.getOrDefault("encoding", "utf8"));
+                    try {
+                        ArtifactContent c = artifactManager.receive(requester, artifactId);
+                        Artifact a = c.getArtifact();
+                        String body;
+                        if ("base64".equalsIgnoreCase(encoding)) {
+                            body = Base64.getEncoder().encodeToString(c.getBytes());
+                        } else {
+                            body = new String(c.getBytes(), StandardCharsets.UTF_8);
+                        }
+                        return String.format("[artifact: %s from %s, %d bytes, sha256 verified]%n%s",
+                                a.getFilename(), a.getSender(), a.getSizeBytes(), body);
+                    } catch (ArtifactException e) {
+                        return "错误: " + e.getMessage();
+                    }
+                });
+
+        // mark_artifact_read —— 标记已读
+        String markReadParams = """
+                {"type":"object","properties":{"artifactId":{"type":"string","description":"artifact ID"}},"required":["artifactId"]}""";
+        mcpClient.registerCustomTool("mark_artifact_read",
+                "将一个 artifact 标记为已读（READ）。仅 recipient 可调用。",
+                markReadParams,
+                (args) -> {
+                    String requester = resolveCurrentAgent();
+                    String artifactId = String.valueOf(args.getOrDefault("artifactId", ""));
+                    try {
+                        artifactManager.markRead(requester, artifactId);
+                        return "已标记 " + artifactId + " 为 READ";
+                    } catch (ArtifactException e) {
+                        return "错误: " + e.getMessage();
+                    }
+                });
+    }
+
+    /**
+     * 解析当前调用 agent 名字：优先 ThreadLocal；未设置（leader 直接调用）时返回 leader 名字。
+     */
+    private String resolveCurrentAgent() {
+        String name = currentAgentName.get();
+        return name != null ? name : leader.getName();
+    }
+
+    /**
+     * 测试辅助：在当前线程上设置当前 agent 名字（模拟 worker dispatch 上下文）。
+     * 调用方应在 finally 中调用 {@link #clearCurrentAgentForTest()} 清除。
+     */
+    void setCurrentAgentForTest(String name) {
+        if (name != null) {
+            currentAgentName.set(name);
+        } else {
+            currentAgentName.remove();
+        }
+    }
+
+    /**
+     * 测试辅助：清除当前线程的 agent 名字。
+     */
+    void clearCurrentAgentForTest() {
+        currentAgentName.remove();
+    }
+
+    /**
+     * 解码 content 字段：utf8 直接转字节，base64 解码。
+     */
+    private static byte[] decodeContent(String content, String encoding) {
+        if (content == null || content.isEmpty()) {
+            return new byte[0];
+        }
+        if ("base64".equalsIgnoreCase(encoding)) {
+            try {
+                return Base64.getDecoder().decode(content);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("base64 解码失败: " + e.getMessage());
+            }
+        }
+        return content.getBytes(StandardCharsets.UTF_8);
     }
 
     // ==================== 团队工具描述 ====================
@@ -481,7 +723,7 @@ public class AgentTeam {
      * @return 团队工具描述字符串
      */
     public String getTeamToolsDescription() {
-        return """
+        String base = """
                 你现在是一个团队的领导者，拥有以下团队管理工具：
 
                 1. agent_create - 创建一个工作者智能体来执行子任务
@@ -504,6 +746,24 @@ public class AgentTeam {
                 - 任务完成后用 team_dissolve 解散团队
                 - 综合各工作者的结果，给出最终答案
                 """;
+        if (artifactManager != null) {
+            base += """
+
+                    ## 文件传递（artifact）
+
+                    当工作者产出代码、报告、JSON、CSV、图片等结构化或大块内容时，**优先**让工作者用 share_file 以文件形式发回，而不是塞进 agent_message 的纯文本（长内容会被截断、二进制无法传）。
+
+                    1. share_file(filename, recipients, content, encoding?, mimeType?, description?, tags?) — 发送文件
+                       参数: {"filename":"报告文件名", "recipients":["leader"], "content":"文件内容", "encoding":"utf8|base64"}
+                    2. list_artifacts(status?, tag?, sender?, limit?) — 列出可见 artifact
+                    3. get_artifact(artifactId, encoding?) — 接收并校验文件（自动推进到 RECEIVED）
+                    4. mark_artifact_read(artifactId) — 标记已读
+
+                    文件传递支持 sha256 完整性校验和 SENT/RECEIVED/READ 状态跟踪；接收者限定在 recipients 名单。
+                    工具调用时系统自动识别调用者名字作为 sender / requester。
+                    """;
+        }
+        return base;
     }
 
     // ==================== 状态查询 ====================
@@ -610,5 +870,27 @@ public class AgentTeam {
      */
     public SharedKnowledgeBase getKnowledgeBase() {
         return knowledgeBase;
+    }
+
+    /**
+     * 获取 artifact 管理服务（可能为 null）。
+     */
+    public ArtifactManager getArtifactManager() {
+        return artifactManager;
+    }
+
+    /**
+     * 装配 artifact 管理服务。必须在 {@link #registerTeamTools()} 之前调用。
+     * <p>
+     * 若团队构造时未传入 ArtifactManager，调用此方法可后注入；
+     * 之后 {@link #registerTeamTools()} 会注册 4 个 artifact 工具到 leader。
+     * </p>
+     */
+    public void setArtifactManager(ArtifactManager artifactManager) {
+        if (this.artifactManager != null) {
+            throw new IllegalStateException("artifactManager 已设置，不可重复装配");
+        }
+        this.artifactManager = Objects.requireNonNull(artifactManager, "artifactManager");
+        log.info("团队 [{}] 已装配 ArtifactManager", teamId);
     }
 }

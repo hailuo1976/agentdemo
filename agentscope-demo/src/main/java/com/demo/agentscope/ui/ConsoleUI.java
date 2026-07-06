@@ -199,6 +199,7 @@ public class ConsoleUI {
             case AGENT_MESSAGE -> MAGENTA + "📨" + RESET;
             case TEAM_DISSOLVE -> RED + "💔" + RESET;
             case REPLY_BUDGET_EXCEEDED -> RED + "💰" + RESET;
+            case OUTPUT_TRUNCATED -> RED + "✂️" + RESET;
         };
     }
 
@@ -252,6 +253,11 @@ public class ConsoleUI {
                 Object budget = event.getData("budget");
                 Object actual = event.getData("actual");
                 yield "预算超限: budget=" + budget + ", actual=" + actual;
+            }
+            case OUTPUT_TRUNCATED -> {
+                Object ct = event.getData("completionTokens");
+                Object mt = event.getData("maxTokens");
+                yield "输出截断: completion=" + ct + ", maxTokens=" + mt;
             }
         };
     }

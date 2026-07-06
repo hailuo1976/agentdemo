@@ -35,6 +35,7 @@ import com.demo.agentscope.stock.data.AkShareDataSource;
 import com.demo.agentscope.stock.data.StockDataService;
 import com.demo.agentscope.stock.data.TuShareDataSource;
 import com.demo.agentscope.stock.filter.StockFilterService;
+import com.demo.agentscope.team.ArtifactManager;
 import com.demo.agentscope.stock.industry.IndustryService;
 import com.demo.agentscope.stock.scoring.LeaderScoringService;
 import com.demo.agentscope.workspace.LocalWorkspace;
@@ -465,6 +466,12 @@ public class AgentScopeDemoApplication {
         engine.addRule(new PermissionRule("agent_list", PermissionDecision.ALLOW, "列出团队工作者"));
         engine.addRule(new PermissionRule("team_dissolve", PermissionDecision.ALLOW, "解散团队"));
 
+        // 允许团队 artifact 工具（leader/worker 文件形式传递产出）
+        engine.addRule(new PermissionRule("share_file", PermissionDecision.ALLOW, "团队内文件传递"));
+        engine.addRule(new PermissionRule("list_artifacts", PermissionDecision.ALLOW, "列出可见 artifact"));
+        engine.addRule(new PermissionRule("get_artifact", PermissionDecision.ALLOW, "接收 artifact（含 sha256 校验）"));
+        engine.addRule(new PermissionRule("mark_artifact_read", PermissionDecision.ALLOW, "标记 artifact 已读"));
+
         // 允许股票工具（受 STOCK_TOOLS_ENABLED 控制）
         if (stockEnabled) {
             addStockPermissionRules(engine);
@@ -600,13 +607,17 @@ public class AgentScopeDemoApplication {
                         agent, chatModel, mcpClient,
                         credentialProvider, permissionEngine, workspaceManager, providerName
                 );
+                // 装配 ArtifactManager 并注入团队（artifact 存储根复用 secureFileWorkspace 的 baseDir）
+                Path teamWorkspaceRoot = secureFileWorkspace.getPermissionManager().getBaseDir();
+                ArtifactManager artifactManager = new ArtifactManager(teamWorkspaceRoot, team.getTeamId());
+                team.setArtifactManager(artifactManager);
                 // 注册团队工具到 MCPClient 并更新领导者系统提示词
                 team.registerTeamTools();
                 ConsoleUI.printSuccess("智能体团队已创建，领导者已获得团队管理工具");
                 ConsoleUI.printInfo("领导者: " + agent.getName());
                 ConsoleUI.printInfo("团队ID: " + team.getTeamId());
                 ConsoleUI.printSeparator();
-                ConsoleUI.printInfo("可用团队工具: agent_create / agent_message / agent_list / team_dissolve");
+                ConsoleUI.printInfo("可用团队工具: agent_create / agent_message / agent_list / team_dissolve / share_file / list_artifacts / get_artifact / mark_artifact_read");
                 continue;
             }
 
