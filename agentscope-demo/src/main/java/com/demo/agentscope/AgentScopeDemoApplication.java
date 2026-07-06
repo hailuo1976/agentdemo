@@ -664,7 +664,7 @@ public class AgentScopeDemoApplication {
                         case ASK -> "\u001B[33m? ASK\u001B[0m";
                     };
                     System.out.println("  " + decisionIcon + "  " + rule.getToolName()
-                            + " - " + rule.getReason()
+                            + " - " + rule.getAction().getReason()
                             + (rule.isBypassImmune() ? " [旁路免疫]" : ""));
                 }
                 ConsoleUI.printSeparator();
