@@ -36,19 +36,69 @@ public class ChatModel {
     private int maxOutputTokens = 8192;
     private static final double DEFAULT_TEMPERATURE = 0.7;
 
-    /** OkHttp 客户端 */
-    private final OkHttpClient httpClient;
+    /** LLM HTTP 超时（秒）。默认值与 {@link com.demo.agentscope.config.AgentLimits} 保持一致。 */
+    private long connectTimeoutSeconds = 30;
+    private long readTimeoutSeconds = 300;  // 加长默认：覆盖模型推理静默期
+    private long writeTimeoutSeconds = 30;
+
+    /** LLM 调用遇到 SocketTimeoutException 时的最大重试次数（0 表示不重试）。 */
+    private int maxRetries = 2;
+
+    /** OkHttp 客户端（运行期可通过 {@link #rebuildHttpClient} 重建以应用新超时） */
+    private OkHttpClient httpClient;
 
     /** 凭证提供者 */
     private final CredentialProvider credentialProvider;
 
     public ChatModel(CredentialProvider credentialProvider) {
         this.credentialProvider = credentialProvider;
-        this.httpClient = new OkHttpClient.Builder()
-                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
-                .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        this.httpClient = buildHttpClient();
+    }
+
+    private OkHttpClient buildHttpClient() {
+        return new OkHttpClient.Builder()
+                .connectTimeout(connectTimeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(readTimeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
+                .writeTimeout(writeTimeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
                 .build();
+    }
+
+    /**
+     * 应用 LLM HTTP 超时配置。若任一值发生变化，重建 OkHttp 客户端。
+     * <p>
+     * 由 {@code AgentScopeDemoApplication} 装配时从 {@link com.demo.agentscope.config.AgentLimits} 传入；
+     * REPL {@code /config set llmReadTimeoutSeconds=N} 后会再次调用以即时生效。
+     * </p>
+     */
+    public void setTimeouts(long connectSeconds, long readSeconds, long writeSeconds) {
+        boolean changed = this.connectTimeoutSeconds != connectSeconds
+                || this.readTimeoutSeconds != readSeconds
+                || this.writeTimeoutSeconds != writeSeconds;
+        this.connectTimeoutSeconds = connectSeconds;
+        this.readTimeoutSeconds = readSeconds;
+        this.writeTimeoutSeconds = writeSeconds;
+        if (changed) {
+            // 旧 client 的连接池和调度器需关闭；新请求会用新 client
+            OkHttpClient old = this.httpClient;
+            this.httpClient = buildHttpClient();
+            if (old != null) {
+                old.dispatcher().executorService().shutdown();
+                old.connectionPool().evictAll();
+            }
+            log.info("LLM HTTP 超时已更新: connect={}s, read={}s, write={}s",
+                    connectSeconds, readSeconds, writeSeconds);
+        }
+    }
+
+    /** 设置 LLM 调用的最大重试次数（仅针对 SocketTimeoutException，且仅限未产生输出时）。 */
+    public void setMaxRetries(int maxRetries) {
+        if (maxRetries >= 0) {
+            this.maxRetries = maxRetries;
+        }
+    }
+
+    public int getMaxRetries() {
+        return maxRetries;
     }
 
     /**
@@ -88,34 +138,70 @@ public class ChatModel {
             throw new IllegalStateException("提供商 [" + providerName + "] Base URL 未配置");
         }
 
-        try {
-            ObjectNode requestBody = buildRequestBody(modelName, messages, tools);
-            String url = baseUrl + "/chat/completions";
+        // 非流式调用：SocketTimeoutException 时整次重试（无外部副作用）
+        int maxAttempts = Math.max(1, maxRetries + 1);
+        IOException lastError = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                ObjectNode requestBody = buildRequestBody(modelName, messages, tools);
+                String url = baseUrl + "/chat/completions";
 
-            log.debug("发送聊天请求: provider={}, model={}, url={}", providerName, modelName, url);
-
-            Request request = new Request.Builder()
-                    .url(url)
-                    .addHeader("Authorization", "Bearer " + apiKey)
-                    .addHeader("Content-Type", "application/json")
-                    .post(RequestBody.create(requestBody.toString(), JSON_MEDIA_TYPE))
-                    .build();
-
-            try (Response response = httpClient.newCall(request).execute()) {
-                if (!response.isSuccessful()) {
-                    String body = response.body() != null ? response.body().string() : "无响应体";
-                    if (response.code() >= 400 && response.code() < 500) {
-                        log.warn("LLM 4xx 拒绝, messages 序列摘要:\n{}", summarizeMessagesForLog(messages));
-                    }
-                    throw new IOException("API 请求失败: status=" + response.code() + ", body=" + body);
+                if (attempt > 1) {
+                    log.info("[chat] 重试 {}/{} (provider={}, model={})",
+                            attempt - 1, maxRetries, providerName, modelName);
+                } else {
+                    log.debug("发送聊天请求: provider={}, model={}, url={}", providerName, modelName, url);
                 }
-                String responseBody = response.body() != null ? response.body().string() : "{}";
-                return parseResponse(responseBody);
+
+                Request request = new Request.Builder()
+                        .url(url)
+                        .addHeader("Authorization", "Bearer " + apiKey)
+                        .addHeader("Content-Type", "application/json")
+                        .post(RequestBody.create(requestBody.toString(), JSON_MEDIA_TYPE))
+                        .build();
+
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (!response.isSuccessful()) {
+                        String body = response.body() != null ? response.body().string() : "无响应体";
+                        if (response.code() >= 400 && response.code() < 500) {
+                            log.warn("LLM 4xx 拒绝, messages 序列摘要:\n{}", summarizeMessagesForLog(messages));
+                        }
+                        throw new IOException("API 请求失败: status=" + response.code() + ", body=" + body);
+                    }
+                    String responseBody = response.body() != null ? response.body().string() : "{}";
+                    return parseResponse(responseBody);
+                }
+            } catch (IOException e) {
+                lastError = e;
+                if (!isReadTimeout(e) || attempt >= maxAttempts) {
+                    break;
+                }
+                // 指数退避：2s, 4s, 8s...
+                backoffSleep(attempt);
             }
-        } catch (IOException e) {
-            log.error("聊天请求异常: provider={}, model={}", providerName, modelName, e);
-            // 返回错误消息
-            return Msg.assistantText("请求失败: " + e.getMessage());
+        }
+        log.error("聊天请求异常: provider={}, model={}", providerName, modelName, lastError);
+        return Msg.assistantText("请求失败: " + (lastError != null ? lastError.getMessage() : "unknown"));
+    }
+
+    /** 判断异常链是否含 SocketTimeoutException（read timed out）。 */
+    private static boolean isReadTimeout(Throwable t) {
+        while (t != null) {
+            if (t instanceof java.net.SocketTimeoutException) {
+                return true;
+            }
+            t = t.getCause();
+        }
+        return false;
+    }
+
+    /** 指数退避：第 attempt 次重试前 sleep 2^attempt 秒。 */
+    private static void backoffSleep(int attempt) {
+        long sleepMillis = (1L << attempt) * 1000L;  // 2s, 4s, 8s...
+        try {
+            Thread.sleep(sleepMillis);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -166,67 +252,104 @@ public class ChatModel {
         requestBody.putObject("stream_options").put("include_usage", true);
 
         String url = baseUrl + "/chat/completions";
-        log.debug("发送流式聊天请求: provider={}, model={}, url={}", providerName, modelName, url);
 
-        Request request = new Request.Builder()
-                .url(url)
-                .addHeader("Authorization", "Bearer " + apiKey)
-                .addHeader("Content-Type", "application/json")
-                .addHeader("Accept", "text/event-stream")
-                .post(RequestBody.create(requestBody.toString(), JSON_MEDIA_TYPE))
-                .build();
-
-        // 工具调用增量累积器：按 index 拼接 arguments 分片
+        // 状态：每次重试前需重置（部分输出必须丢弃，避免重复/拼接错乱）
         Map<Integer, ToolCallAccumulator> toolCallAccumulators = new TreeMap<>();
         StringBuilder textBuffer = new StringBuilder();
         StringBuilder reasoningBuffer = new StringBuilder();
         int[] usage = {0, 0};
         // finish_reason[length] 检测：流结束后通知调用方 tool_call 参数可能被截断
         boolean[] lengthTruncated = {false};
+        // 是否已向 sink 发射过 delta：决定能否安全重试（已发射则重试会导致重复输出）
+        boolean[] emitted = {false};
 
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String body = response.body() != null ? response.body().string() : "无响应体";
-                // 协议拒绝时打印 messages 序列摘要，便于定位是哪条消息触发 400
-                if (response.code() >= 400 && response.code() < 500) {
-                    log.warn("LLM 4xx 拒绝, messages 序列摘要:\n{}", summarizeMessagesForLog(messages));
-                }
-                throw new IOException("API 流式请求失败: status=" + response.code() + ", body=" + body);
+        IOException lastError = null;
+        boolean streamCompleted = false;
+        int maxAttempts = Math.max(1, maxRetries + 1);
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (attempt > 1) {
+                // 重试前重置上一轮的部分输出
+                toolCallAccumulators.clear();
+                textBuffer.setLength(0);
+                reasoningBuffer.setLength(0);
+                usage[0] = 0;
+                usage[1] = 0;
+                lengthTruncated[0] = false;
+                emitted[0] = false;
+                log.info("[chatStream] 超时重试 {}/{} (provider={}, model={}, 尚未发射 delta)",
+                        attempt - 1, maxRetries, providerName, modelName);
+            } else {
+                log.debug("发送流式聊天请求: provider={}, model={}, url={}", providerName, modelName, url);
             }
-            try (java.io.BufferedReader reader = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(
-                            response.body().byteStream(),
-                            java.nio.charset.StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.isEmpty()) continue;
-                    if (!line.startsWith("data:")) continue;
-                    String payload = line.substring(5).trim();
-                    if ("[DONE]".equals(payload)) break;
-                    parseStreamFrame(payload, agentId, toolCallAccumulators,
-                            textBuffer, reasoningBuffer, usage, lengthTruncated, sink);
+
+            Request request = new Request.Builder()
+                    .url(url)
+                    .addHeader("Authorization", "Bearer " + apiKey)
+                    .addHeader("Content-Type", "application/json")
+                    .addHeader("Accept", "text/event-stream")
+                    .post(RequestBody.create(requestBody.toString(), JSON_MEDIA_TYPE))
+                    .build();
+
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (!response.isSuccessful()) {
+                    String body = response.body() != null ? response.body().string() : "无响应体";
+                    // 协议拒绝时打印 messages 序列摘要，便于定位是哪条消息触发 400
+                    if (response.code() >= 400 && response.code() < 500) {
+                        log.warn("LLM 4xx 拒绝, messages 序列摘要:\n{}", summarizeMessagesForLog(messages));
+                    }
+                    throw new IOException("API 流式请求失败: status=" + response.code() + ", body=" + body);
                 }
+                try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(
+                                response.body().byteStream(),
+                                java.nio.charset.StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.isEmpty()) continue;
+                        if (!line.startsWith("data:")) continue;
+                        String payload = line.substring(5).trim();
+                        if ("[DONE]".equals(payload)) break;
+                        parseStreamFrame(payload, agentId, toolCallAccumulators,
+                                textBuffer, reasoningBuffer, usage, lengthTruncated, emitted, sink);
+                    }
+                }
+                streamCompleted = true;
+                break;
+            } catch (IOException e) {
+                lastError = e;
+                boolean canRetry = isReadTimeout(e) && attempt < maxAttempts && !emitted[0];
+                if (!canRetry) {
+                    // 不可重试：已发射 delta（重试会导致重复输出）/ 非超时 / 用尽重试次数
+                    if (isReadTimeout(e) && emitted[0]) {
+                        log.warn("流式请求超时但已发射 delta，无法安全重试（重试会导致重复输出）: provider={}",
+                                providerName);
+                    }
+                    log.error("流式聊天请求异常: provider={}, model={}", providerName, modelName, e);
+                    sink.onEvent(AgentEvent.error(agentId, "流式请求失败: " + e.getMessage()));
+                    break;
+                }
+                backoffSleep(attempt);
             }
-        } catch (IOException e) {
-            log.error("流式聊天请求异常: provider={}, model={}", providerName, modelName, e);
-            sink.onEvent(AgentEvent.error(agentId, "流式请求失败: " + e.getMessage()));
         }
 
-        // 流结束：聚合 tool_calls（arguments 分片已完整）+ 发射 MODEL_CALL_END
-        // 若 finish_reason=length，先发射 OUTPUT_TRUNCATED 让调用方知晓参数可能不完整
-        if (lengthTruncated[0]) {
+        // 流结束：聚合 tool_calls（arguments 分片已完整）+ 发射 MODEL_CALL_END。
+        // 仅在流成功读完时发射 tool_calls/OUTPUT_TRUNCATED；失败路径下累积器可能含半截分片。
+        if (streamCompleted && lengthTruncated[0]) {
             log.warn("模型输出达到 max_tokens={} 上限被截断（finish_reason=length），" +
                     "tool_call 参数可能不完整；下一轮将注入 user 消息告知模型",
                     maxOutputTokens);
             sink.onEvent(AgentEvent.outputTruncated(agentId, usage[1], maxOutputTokens));
         }
-        for (ToolCallAccumulator acc : toolCallAccumulators.values()) {
-            Map<String, Object> args = new HashMap<>();
-            args.put("id", acc.id);
-            args.put("name", acc.name);
-            args.put("arguments", acc.arguments.toString());
-            args.put("raw", acc.arguments.toString());
-            sink.onEvent(AgentEvent.toolCall(agentId, acc.name, args));
+        if (streamCompleted) {
+            for (ToolCallAccumulator acc : toolCallAccumulators.values()) {
+                Map<String, Object> args = new HashMap<>();
+                args.put("id", acc.id);
+                args.put("name", acc.name);
+                args.put("arguments", acc.arguments.toString());
+                args.put("raw", acc.arguments.toString());
+                sink.onEvent(AgentEvent.toolCall(agentId, acc.name, args));
+            }
         }
         sink.onEvent(AgentEvent.modelCallEnd(agentId, modelName, usage[0], usage[1]));
     }
@@ -234,11 +357,13 @@ public class ChatModel {
     /**
      * 解析 SSE 单帧 data 负载，delta 事件实时上推到 sink。
      * {@code finish_reason=length} 写入 lengthTruncated[0]，由 chatStream 在流结束后统一发射事件。
+     * 任何 text/thinking delta 上推都会把 emitted[0] 置 true，用于 chatStream 判断是否可安全重试。
      */
     private void parseStreamFrame(String payload, String agentId,
                                    Map<Integer, ToolCallAccumulator> toolCallAccumulators,
                                    StringBuilder textBuffer, StringBuilder reasoningBuffer,
-                                   int[] usage, boolean[] lengthTruncated, StreamSink sink) {
+                                   int[] usage, boolean[] lengthTruncated, boolean[] emitted,
+                                   StreamSink sink) {
         try {
             JsonNode root = OBJECT_MAPPER.readTree(payload);
             JsonNode choices = root.path("choices");
@@ -251,6 +376,7 @@ public class ChatModel {
                 if (!content.isEmpty()) {
                     textBuffer.append(content);
                     sink.onEvent(AgentEvent.textDelta(agentId, content));
+                    emitted[0] = true;
                 }
 
                 // 思考链 delta（DeepSeek / GLM 等支持）—— 实时上推
@@ -258,6 +384,7 @@ public class ChatModel {
                 if (!reasoning.isEmpty()) {
                     reasoningBuffer.append(reasoning);
                     sink.onEvent(AgentEvent.thinkingDelta(agentId, reasoning));
+                    emitted[0] = true;
                 }
 
                 // 工具调用 delta（按 index 拼接 arguments 分片）

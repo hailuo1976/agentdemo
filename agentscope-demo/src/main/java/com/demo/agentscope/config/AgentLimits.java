@@ -72,6 +72,31 @@ public class AgentLimits {
     /** 单文件大小上限（字节），0 表示不限制。 */
     private long maxFileSizeBytes = 0L;
 
+    // ---- LLM HTTP 客户端 ----
+    /**
+     * LLM 流式 HTTP 读取超时秒数。
+     * <p>
+     * 默认 300 秒（5 分钟）。模型在推理过程中可能长时间不输出 token（深度思考、长上下文召回），
+     * OkHttp 默认 10 秒会触发 {@link java.net.SocketTimeoutException}。该值应覆盖最长的「静默期」。
+     * </p>
+     */
+    private long llmReadTimeoutSeconds = 300;
+
+    /** LLM HTTP 连接建立超时秒数。 */
+    private long llmConnectTimeoutSeconds = 30;
+
+    /** LLM HTTP 写入请求体超时秒数。 */
+    private long llmWriteTimeoutSeconds = 30;
+
+    /**
+     * LLM 调用遇到 {@link java.net.SocketTimeoutException} 时的最大重试次数。
+     * <p>
+     * 仅在「未产生任何输出」时重试流式请求（已发射 delta 的请求重试会导致重复输出）。
+     * 默认 2 次，配合指数退避（2s、4s）。
+     * </p>
+     */
+    private int llmMaxRetries = 2;
+
     public AgentLimits() {
     }
 
@@ -98,6 +123,10 @@ public class AgentLimits {
         commandTimeoutSeconds = readLong("COMMAND_TIMEOUT_SECONDS", commandTimeoutSeconds);
         workspaceTimeoutSeconds = readLong("WORKSPACE_TIMEOUT_SECONDS", workspaceTimeoutSeconds);
         maxFileSizeBytes = readLong("MAX_FILE_SIZE_BYTES", maxFileSizeBytes);
+        llmReadTimeoutSeconds = readLong("LLM_READ_TIMEOUT_SECONDS", llmReadTimeoutSeconds);
+        llmConnectTimeoutSeconds = readLong("LLM_CONNECT_TIMEOUT_SECONDS", llmConnectTimeoutSeconds);
+        llmWriteTimeoutSeconds = readLong("LLM_WRITE_TIMEOUT_SECONDS", llmWriteTimeoutSeconds);
+        llmMaxRetries = readInt("LLM_MAX_RETRIES", llmMaxRetries);
         return this;
     }
 
@@ -137,6 +166,10 @@ public class AgentLimits {
             case "commandTimeoutSeconds" -> commandTimeoutSeconds = requirePositiveLong(key, value);
             case "workspaceTimeoutSeconds" -> workspaceTimeoutSeconds = requirePositiveLong(key, value);
             case "maxFileSizeBytes" -> maxFileSizeBytes = requireNonNegativeLong(key, value);
+            case "llmReadTimeoutSeconds" -> llmReadTimeoutSeconds = requirePositiveLong(key, value);
+            case "llmConnectTimeoutSeconds" -> llmConnectTimeoutSeconds = requirePositiveLong(key, value);
+            case "llmWriteTimeoutSeconds" -> llmWriteTimeoutSeconds = requirePositiveLong(key, value);
+            case "llmMaxRetries" -> llmMaxRetries = requireNonNegativeInt(key, value);
             default -> throw new IllegalArgumentException("未知配置项：" + key);
         }
     }
@@ -191,6 +224,18 @@ public class AgentLimits {
     public long getMaxFileSizeBytes() { return maxFileSizeBytes; }
     public void setMaxFileSizeBytes(long maxFileSizeBytes) { this.maxFileSizeBytes = maxFileSizeBytes; }
 
+    public long getLlmReadTimeoutSeconds() { return llmReadTimeoutSeconds; }
+    public void setLlmReadTimeoutSeconds(long llmReadTimeoutSeconds) { this.llmReadTimeoutSeconds = llmReadTimeoutSeconds; }
+
+    public long getLlmConnectTimeoutSeconds() { return llmConnectTimeoutSeconds; }
+    public void setLlmConnectTimeoutSeconds(long llmConnectTimeoutSeconds) { this.llmConnectTimeoutSeconds = llmConnectTimeoutSeconds; }
+
+    public long getLlmWriteTimeoutSeconds() { return llmWriteTimeoutSeconds; }
+    public void setLlmWriteTimeoutSeconds(long llmWriteTimeoutSeconds) { this.llmWriteTimeoutSeconds = llmWriteTimeoutSeconds; }
+
+    public int getLlmMaxRetries() { return llmMaxRetries; }
+    public void setLlmMaxRetries(int llmMaxRetries) { this.llmMaxRetries = llmMaxRetries; }
+
     @Override
     public String toString() {
         return String.format(Locale.ROOT,
@@ -200,12 +245,14 @@ public class AgentLimits {
                         + "shortTermMemoryLimit=%d, longTermMemoryLimit=%d, "
                         + "microCompactorKeepRecent=%d, microCompactorTriggerToolCount=%d, "
                         + "toolResultSummaryThreshold=%d, toolResultSummaryMaxLength=%d, "
-                        + "commandTimeoutSeconds=%d, workspaceTimeoutSeconds=%d, maxFileSizeBytes=%d}",
+                        + "commandTimeoutSeconds=%d, workspaceTimeoutSeconds=%d, maxFileSizeBytes=%d, "
+                        + "llmReadTimeoutSeconds=%d, llmConnectTimeoutSeconds=%d, llmWriteTimeoutSeconds=%d, llmMaxRetries=%d}",
                 maxIterations, replyBudgetTokens, maxOutputTokens, iterationWarnRemaining, tokenBudgetWarnPercent,
                 maxContextTokens, maxRecentMessages, shortTermMemoryLimit, longTermMemoryLimit,
                 microCompactorKeepRecent, microCompactorTriggerToolCount,
                 toolResultSummaryThreshold, toolResultSummaryMaxLength,
-                commandTimeoutSeconds, workspaceTimeoutSeconds, maxFileSizeBytes);
+                commandTimeoutSeconds, workspaceTimeoutSeconds, maxFileSizeBytes,
+                llmReadTimeoutSeconds, llmConnectTimeoutSeconds, llmWriteTimeoutSeconds, llmMaxRetries);
     }
 
     // ---- 解析辅助 ----

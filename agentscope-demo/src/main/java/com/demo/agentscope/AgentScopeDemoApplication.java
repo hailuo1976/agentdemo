@@ -230,6 +230,11 @@ public class AgentScopeDemoApplication {
             // 7. 创建聊天模型客户端
             ChatModel chatModel = new ChatModel(credentialProvider);
             chatModel.setMaxOutputTokens(limits.getMaxOutputTokens());
+            chatModel.setTimeouts(
+                    limits.getLlmConnectTimeoutSeconds(),
+                    limits.getLlmReadTimeoutSeconds(),
+                    limits.getLlmWriteTimeoutSeconds());
+            chatModel.setMaxRetries(limits.getLlmMaxRetries());
 
             // 8. 创建智能体
             String systemPrompt = buildSystemPrompt(STOCK_TOOLS_ENABLED, limits);
@@ -726,6 +731,10 @@ public class AgentScopeDemoApplication {
                     System.out.printf("  commandTimeoutSeconds = %d%n", limits.getCommandTimeoutSeconds());
                     System.out.printf("  workspaceTimeoutSeconds = %d%n", limits.getWorkspaceTimeoutSeconds());
                     System.out.printf("  maxFileSizeBytes = %d (0=沿用默认10MB)%n", limits.getMaxFileSizeBytes());
+                    System.out.printf("  llmReadTimeoutSeconds = %d (LLM 流式读取超时)%n", limits.getLlmReadTimeoutSeconds());
+                    System.out.printf("  llmConnectTimeoutSeconds = %d%n", limits.getLlmConnectTimeoutSeconds());
+                    System.out.printf("  llmWriteTimeoutSeconds = %d%n", limits.getLlmWriteTimeoutSeconds());
+                    System.out.printf("  llmMaxRetries = %d (SocketTimeoutException 自动重试次数)%n", limits.getLlmMaxRetries());
                     ConsoleUI.printSeparator();
                     ConsoleUI.printInfo("用法: /config set key=value  （运行期即时生效，覆盖 env 与默认值）");
                 } else if ("set".equals(parts[1]) && parts.length == 3) {
@@ -887,6 +896,11 @@ public class AgentScopeDemoApplication {
         }
         if (chatModel != null) {
             chatModel.setMaxOutputTokens(limits.getMaxOutputTokens());
+            chatModel.setTimeouts(
+                    limits.getLlmConnectTimeoutSeconds(),
+                    limits.getLlmReadTimeoutSeconds(),
+                    limits.getLlmWriteTimeoutSeconds());
+            chatModel.setMaxRetries(limits.getLlmMaxRetries());
         }
         if (agent != null) {
             agent.setToolResultSummaryLimits(
