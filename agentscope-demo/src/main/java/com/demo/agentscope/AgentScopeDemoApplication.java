@@ -4,6 +4,7 @@ import com.demo.agentscope.agent.Agent;
 import com.demo.agentscope.agent.AgentTeam;
 import com.demo.agentscope.agent.SystemPrompts;
 import com.demo.agentscope.cache.IntermediateResultManager;
+import com.demo.agentscope.config.AgentLimits;
 import com.demo.agentscope.context.ContextManager;
 import com.demo.agentscope.credential.CredentialProvider;
 import com.demo.agentscope.credential.DefaultCredentialProvider;
@@ -44,6 +45,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
+import java.util.Locale;
 
 /**
  * AgentScope 2.0 演示应用入口。
@@ -72,10 +74,6 @@ public class AgentScopeDemoApplication {
     private static final boolean STOCK_TOOLS_ENABLED =
             Boolean.parseBoolean(System.getenv().getOrDefault("STOCK_TOOLS_ENABLED", "false"));
 
-    /** 上下文压缩阈值（token 数），通过 MAX_CONTEXT_TOKENS 环境变量调整，默认 40000。 */
-    private static final int MAX_CONTEXT_TOKENS =
-            Integer.parseInt(System.getenv().getOrDefault("MAX_CONTEXT_TOKENS", "40000"));
-
     /** 股票工具名称清单，用于运行期 /stock off 反注册。 */
     private static final List<String> STOCK_TOOL_NAMES = List.of(
             "list_industries", "select_industry_leaders",
@@ -98,8 +96,9 @@ public class AgentScopeDemoApplication {
      * 构建系统提示词。
      *
      * @param stockEnabled 是否启用股票工具，启用时追加股票工具描述与数据源说明
+     * @param limits       运行时限制（迭代/token 预算/超时等），用于动态拼装「运行时约束」段
      */
-    private static String buildSystemPrompt(boolean stockEnabled) {
+    private static String buildSystemPrompt(boolean stockEnabled, AgentLimits limits) {
         StringBuilder sb = new StringBuilder();
         sb.append("""
                 你是 AgentScope 2.0 智能体助手。你可以通过调用工具来帮助用户完成各种任务。
@@ -115,8 +114,9 @@ public class AgentScopeDemoApplication {
                 3. 当需要计算、数据处理、网络请求或运行脚本时，使用 execute_python 执行代码并直接返回结果，不要只写代码让用户自己跑。
                 4. 当执行失败时，请分析错误原因，修正代码后重试，不要无脑重试。
                 5. 文件操作受权限管控，只能访问授权目录下的文件。
-                6. 代码执行受安全策略限制（禁止危险命令、30秒超时）。
+                6. 代码执行受安全策略限制（禁止危险命令、超时见下方约束）。
                 """);
+        sb.append(buildRuntimeConstraints(limits));
         if (stockEnabled) {
             sb.append(STOCK_PROMPT_ADDENDUM);
         }
@@ -124,11 +124,44 @@ public class AgentScopeDemoApplication {
         return sb.toString();
     }
 
+    /**
+     * 拼装「运行时约束」段，所有数值取自 {@link AgentLimits}，确保单一来源。
+     * <p>
+     * 设计原因：把这些约束写进系统提示词，模型才能在触达上限前主动收敛、
+     * 或换用允许的工具/路径，而不是反复试错浪费预算。
+     * </p>
+     */
+    private static String buildRuntimeConstraints(AgentLimits limits) {
+        return String.format(Locale.ROOT, """
+
+                ## 运行时约束（请主动管理预算）
+
+                - **迭代上限**：%d 轮工具调用。剩余约 %d 轮时会收到预算告警，请评估能否在剩余轮次内收敛；若不能，请总结当前进度与未完成项。
+                - **Token 预算**：单次回复约 %d tokens，上下文窗口约 %d tokens。超预算会强制终止本轮回复。
+                - **工具结果摘要**：单条工具结果超过 %d 字符会被自动摘要（前缀含「已被自动摘要」标记），如需精确数据请缩小查询范围重新调用。
+                - **文件大小上限**：%s；危险扩展名（exe/sh/bat 等）与 .env、secrets、.git 路径会被拒绝。
+                - **命令执行**：单条命令超时 %d 秒；workspace 操作超时 %d 秒；危险模式（rm -rf、curl|sh 等）会被权限引擎拒绝，tool_result 会携带具体原因。
+                - **权限拒绝处理**：被拒绝后请阅读 tool_result 中的原因，调整参数或换用允许的工具；不要重复尝试同一参数。
+                """,
+                limits.getMaxIterations(),
+                limits.getIterationWarnRemaining(),
+                limits.getReplyBudgetTokens(),
+                limits.getMaxContextTokens(),
+                limits.getToolResultSummaryThreshold(),
+                limits.getMaxFileSizeBytes() > 0 ? limits.getMaxFileSizeBytes() + " bytes" : "不限",
+                limits.getCommandTimeoutSeconds(),
+                limits.getWorkspaceTimeoutSeconds());
+    }
+
     public static void main(String[] args) {
         // 1. 打印横幅
         ConsoleUI.printBanner();
 
         try {
+            // 1.1 加载运行时限制（代码默认值 → 环境变量覆盖；REPL /config 之后还能再覆盖）
+            AgentLimits limits = new AgentLimits().loadFromEnv();
+            log.info("运行时限制已加载: {}", limits);
+
             // 2. 创建凭证提供者，自动检测环境变量
             DefaultCredentialProvider credentialProvider = new DefaultCredentialProvider();
             log.info("凭证提供者已创建，可用提供商: {}", credentialProvider.getAvailableProviders());
@@ -145,12 +178,13 @@ public class AgentScopeDemoApplication {
             mcpClient.initialize();
 
             // 4.1 创建安全文件工作空间并注册文件读写工具
-            SecureFileWorkspace secureFileWorkspace = createSecureFileWorkspace();
+            SecureFileWorkspace secureFileWorkspace = createSecureFileWorkspace(limits);
             mcpClient.registerFileTools(secureFileWorkspace);
 
             // 4.2 创建代码执行管理器并注册代码执行工具
             CodeExecutionManager executionManager = new CodeExecutionManager(
-                    secureFileWorkspace.getPermissionManager().getBaseDir());
+                    secureFileWorkspace.getPermissionManager().getBaseDir(),
+                    limits.getCommandTimeoutSeconds());
             mcpClient.registerCodeExecutionTools(executionManager);
 
             // 4.3 创建中间结果管理器并注册缓存工具
@@ -197,7 +231,7 @@ public class AgentScopeDemoApplication {
             ChatModel chatModel = new ChatModel(credentialProvider);
 
             // 8. 创建智能体
-            String systemPrompt = buildSystemPrompt(STOCK_TOOLS_ENABLED);
+            String systemPrompt = buildSystemPrompt(STOCK_TOOLS_ENABLED, limits);
             Agent agent = new Agent(
                     "AgentScope-2.0",
                     systemPrompt,
@@ -208,6 +242,9 @@ public class AgentScopeDemoApplication {
                     workspaceManager,
                     primaryProvider
             );
+            // 同步迭代上限到 Agent（Agent 内部仍保留独立字段，便于 REPL /config 即时生效）
+            agent.setMaxIterations(limits.getMaxIterations());
+            agent.setLimits(limits);
 
             // 8.1 创建短期记忆管理器
             ShortTermMemory shortTermMemory = new ShortTermMemory(
@@ -223,16 +260,34 @@ public class AgentScopeDemoApplication {
             );
 
             // 8.3 创建智能上下文管理器并集成到智能体
-            ContextManager contextManager = new ContextManager(shortTermMemory, systemPrompt, MAX_CONTEXT_TOKENS);
+            ContextManager contextManager = new ContextManager(
+                    shortTermMemory, systemPrompt,
+                    limits.getMaxContextTokens(),
+                    limits.getMaxRecentMessages(),
+                    limits.getShortTermMemoryLimit(),
+                    limits.getLongTermMemoryLimit());
             contextManager.setLongTermMemory(longTermMemory);
+            contextManager.setMicroCompactorLimits(
+                    limits.getMicroCompactorKeepRecent(),
+                    limits.getMicroCompactorTriggerToolCount());
             agent.setContextManager(contextManager);
+            // 注入 SystemPromptGenerator，供 /config set 后 regenerateSystemPrompt 回调
+            agent.setSystemPromptGenerator(
+                    (stockEnabled, lim) -> buildSystemPrompt(stockEnabled, lim),
+                    STOCK_TOOLS_ENABLED);
 
             // 挂载中间件链
             MiddlewareChain chain = agent.getMiddlewareChain();
             chain.add(new TracingMiddleware());
             chain.add(new ContextCompressionMiddleware());
             chain.add(new PermissionMiddleware(permissionEngine));
-            chain.add(new ReplyBudgetControlMiddleware());
+            ReplyBudgetControlMiddleware replyBudgetMiddleware =
+                    new ReplyBudgetControlMiddleware(limits.getReplyBudgetTokens());
+            chain.add(replyBudgetMiddleware);
+            agent.setReplyBudgetMiddleware(replyBudgetMiddleware);
+            agent.setToolResultSummaryLimits(
+                    limits.getToolResultSummaryThreshold(),
+                    limits.getToolResultSummaryMaxLength());
 
             // 打印启动信息
             printStartupInfo(primaryProvider, modelName, mcpClient, permissionEngine, STOCK_TOOLS_ENABLED);
@@ -246,7 +301,8 @@ public class AgentScopeDemoApplication {
             java.util.concurrent.atomic.AtomicBoolean stockEnabled =
                     new java.util.concurrent.atomic.AtomicBoolean(STOCK_TOOLS_ENABLED);
             runREPL(agent, credentialProvider, chatModel, mcpClient, permissionEngine, workspaceManager, primaryProvider,
-                    stockEnabled, secureFileWorkspace, executionManager, workspaceDir);
+                    stockEnabled, secureFileWorkspace, executionManager, workspaceDir, limits,
+                    contextManager, replyBudgetMiddleware);
 
         } catch (Exception e) {
             log.error("应用启动失败", e);
@@ -325,13 +381,18 @@ public class AgentScopeDemoApplication {
      *
      * @return 安全文件工作空间
      */
-    private static SecureFileWorkspace createSecureFileWorkspace() {
+    private static SecureFileWorkspace createSecureFileWorkspace(AgentLimits limits) {
         // 工作空间根目录
         String workspaceDir = System.getenv().getOrDefault("WORKSPACE_DIR", "workspace");
         Path baseDir = Path.of(workspaceDir).toAbsolutePath().normalize();
 
         // 创建根目录（如果不存在）
         baseDir.toFile().mkdirs();
+
+        // 单文件大小上限：limits 为 0（默认值）时退化为 10MB（保持旧行为）
+        long maxFileSize = limits.getMaxFileSizeBytes() > 0
+                ? limits.getMaxFileSizeBytes()
+                : 10L * 1024 * 1024;
 
         // 配置文件权限策略
         FilePermissionConfig config = new FilePermissionConfig.Builder()
@@ -343,12 +404,12 @@ public class AgentScopeDemoApplication {
                 .denyExtension("exe")
                 .denyExtension("sh")
                 .denyExtension("bat")
-                .maxFileSize(10 * 1024 * 1024)  // 10MB
+                .maxFileSize(maxFileSize)
                 .defaultPolicy(FilePermissionConfig.DefaultPolicy.DENY_ALL)
                 .build();
 
         FilePermissionManager permissionManager = new FilePermissionManager(baseDir, config);
-        LocalWorkspace localWorkspace = new LocalWorkspace(baseDir.toString());
+        LocalWorkspace localWorkspace = new LocalWorkspace(baseDir.toString(), limits.getWorkspaceTimeoutSeconds());
         localWorkspace.initialize();
 
         SecureFileWorkspace secureWorkspace = new SecureFileWorkspace(localWorkspace, permissionManager);
@@ -404,7 +465,9 @@ public class AgentScopeDemoApplication {
         }
 
         // 需要确认的工具
-        engine.addRule(new PermissionRule("bash", PermissionDecision.ASK, "Shell 命令需人工确认"));
+        engine.addRule(new PermissionRule("bash",
+                com.demo.agentscope.permission.PermissionDecision.ask("Shell 命令需人工确认"),
+                "Shell 命令需人工确认"));
 
         log.info("权限引擎已创建，模式={}，规则数={}", engine.getMode(), engine.getRules().size());
         return engine;
@@ -457,7 +520,10 @@ public class AgentScopeDemoApplication {
                                 java.util.concurrent.atomic.AtomicBoolean stockEnabled,
                                 SecureFileWorkspace secureFileWorkspace,
                                 CodeExecutionManager executionManager,
-                                Path workspaceDir) {
+                                Path workspaceDir,
+                                AgentLimits limits,
+                                ContextManager contextManager,
+                                ReplyBudgetControlMiddleware replyBudgetMiddleware) {
         AgentTeam team = null;
         boolean showEvents = false;
 
@@ -592,7 +658,7 @@ public class AgentScopeDemoApplication {
                 System.out.println();
                 var rules = permissionEngine.getRules();
                 for (PermissionRule rule : rules) {
-                    String decisionIcon = switch (rule.getAction()) {
+                    String decisionIcon = switch (rule.getAction().getType()) {
                         case ALLOW -> "\u001B[32m✓ ALLOW\u001B[0m";
                         case DENY -> "\u001B[31m✗ DENY\u001B[0m";
                         case ASK -> "\u001B[33m? ASK\u001B[0m";
@@ -632,6 +698,45 @@ public class AgentScopeDemoApplication {
                         ConsoleUI.printError("无效的级别: " + parts[1]);
                         ConsoleUI.printInfo("可选: MINIMAL / STANDARD / VERBOSE / DEBUG");
                     }
+                }
+                continue;
+            }
+
+            if (trimmed.toLowerCase().startsWith("/config")) {
+                String[] parts = trimmed.split("\\s+", 3);
+                if (parts.length == 1) {
+                    // 列出所有运行时限制
+                    System.out.println();
+                    System.out.println("\u001B[1m  ⚙️ 运行时限制\u001B[0m");
+                    ConsoleUI.printSeparator();
+                    System.out.printf("  maxIterations = %d (迭代上限)%n", limits.getMaxIterations());
+                    System.out.printf("  replyBudgetTokens = %d (单次回复 token 预算)%n", limits.getReplyBudgetTokens());
+                    System.out.printf("  iterationWarnRemaining = %d (剩余多少轮开始告警)%n", limits.getIterationWarnRemaining());
+                    System.out.printf("  tokenBudgetWarnPercent = %d%% (token 预算告警阈值)%n", limits.getTokenBudgetWarnPercent());
+                    System.out.printf("  maxContextTokens = %d (上下文窗口)%n", limits.getMaxContextTokens());
+                    System.out.printf("  maxRecentMessages = %d (压缩保留消息数)%n", limits.getMaxRecentMessages());
+                    System.out.printf("  shortTermMemoryLimit = %d%n", limits.getShortTermMemoryLimit());
+                    System.out.printf("  longTermMemoryLimit = %d%n", limits.getLongTermMemoryLimit());
+                    System.out.printf("  microCompactorKeepRecent = %d%n", limits.getMicroCompactorKeepRecent());
+                    System.out.printf("  microCompactorTriggerToolCount = %d%n", limits.getMicroCompactorTriggerToolCount());
+                    System.out.printf("  toolResultSummaryThreshold = %d chars%n", limits.getToolResultSummaryThreshold());
+                    System.out.printf("  toolResultSummaryMaxLength = %d chars%n", limits.getToolResultSummaryMaxLength());
+                    System.out.printf("  commandTimeoutSeconds = %d%n", limits.getCommandTimeoutSeconds());
+                    System.out.printf("  workspaceTimeoutSeconds = %d%n", limits.getWorkspaceTimeoutSeconds());
+                    System.out.printf("  maxFileSizeBytes = %d (0=沿用默认10MB)%n", limits.getMaxFileSizeBytes());
+                    ConsoleUI.printSeparator();
+                    ConsoleUI.printInfo("用法: /config set key=value  （运行期即时生效，覆盖 env 与默认值）");
+                } else if ("set".equals(parts[1]) && parts.length == 3) {
+                    try {
+                        limits.apply(parts[2]);
+                        applyLimitsToRuntime(agent, contextManager, replyBudgetMiddleware,
+                                executionManager, workspaceDir, limits);
+                        ConsoleUI.printSuccess("已更新: " + parts[2]);
+                    } catch (Exception e) {
+                        ConsoleUI.printError("设置失败: " + e.getMessage());
+                    }
+                } else {
+                    ConsoleUI.printError("用法: /config 或 /config set key=value");
                 }
                 continue;
             }
@@ -741,6 +846,46 @@ public class AgentScopeDemoApplication {
     private static void addStockPermissionRules(PermissionEngine engine) {
         for (String tool : STOCK_TOOL_NAMES) {
             engine.addRule(new PermissionRule(tool, PermissionDecision.ALLOW, "股票分析工具"));
+        }
+    }
+
+    /**
+     * REPL /config set 之后调用，把变更同步到所有持引用/数值快照的组件。
+     * <p>
+     * 持 AgentLimits 引用的组件会自动看到新值；持具体数值快照的组件
+     * （ContextManager 的 maxContextTokens/maxRecentMessages、ReplyBudgetControlMiddleware
+     * 的 budget 等）需要显式 setter 刷新。
+     * </p>
+     */
+    private static void applyLimitsToRuntime(Agent agent,
+                                              ContextManager contextManager,
+                                              ReplyBudgetControlMiddleware replyBudgetMiddleware,
+                                              CodeExecutionManager executionManager,
+                                              Path workspaceDir,
+                                              AgentLimits limits) {
+        if (agent != null) {
+            agent.setMaxIterations(limits.getMaxIterations());
+            agent.regenerateSystemPrompt(STOCK_TOOLS_ENABLED, limits);
+        }
+        if (contextManager != null) {
+            contextManager.updateLimits(
+                    limits.getMaxContextTokens(),
+                    limits.getMaxRecentMessages(),
+                    limits.getShortTermMemoryLimit(),
+                    limits.getLongTermMemoryLimit(),
+                    limits.getMicroCompactorKeepRecent(),
+                    limits.getMicroCompactorTriggerToolCount());
+        }
+        if (replyBudgetMiddleware != null) {
+            replyBudgetMiddleware.updateBudget(limits.getReplyBudgetTokens());
+        }
+        if (executionManager != null) {
+            executionManager.updateTimeoutSeconds(limits.getCommandTimeoutSeconds());
+        }
+        if (agent != null) {
+            agent.setToolResultSummaryLimits(
+                    limits.getToolResultSummaryThreshold(),
+                    limits.getToolResultSummaryMaxLength());
         }
     }
 }

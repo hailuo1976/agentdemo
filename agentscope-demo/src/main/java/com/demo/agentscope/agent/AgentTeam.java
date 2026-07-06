@@ -158,8 +158,7 @@ public class AgentTeam {
      */
     public Msg reply(String userInput) {
         if (!active) {
-            return new Msg(UUID.randomUUID().toString(), "assistant",
-                    List.of(new ContentBlock.TextBlock("团队已解散，无法处理请求")));
+            return Msg.assistantText("团队已解散，无法处理请求");
         }
 
         log.info("团队 [{}] 收到用户输入，委托给领导者 [{}]", teamId, leader.getName());
@@ -228,8 +227,7 @@ public class AgentTeam {
         Agent worker = workers.get(workerName);
         if (worker == null) {
             log.warn("工作者 [{}] 不存在", workerName);
-            return new Msg(UUID.randomUUID().toString(), "assistant",
-                    List.of(new ContentBlock.TextBlock("工作者 " + workerName + " 不存在")));
+            return Msg.assistantText("工作者 " + workerName + " 不存在");
         }
 
         // 进度跟踪：分配任务
@@ -238,10 +236,20 @@ public class AgentTeam {
         progressTracker.onWorkerStart(workerName, message);
 
         long startTime = System.currentTimeMillis();
-        Msg reply = worker.replySyncFromStream(message);
+        boolean success = true;
+        Msg reply;
+        try {
+            reply = worker.replySyncFromStream(message);
+        } catch (Exception e) {
+            success = false;
+            log.error("工作者 [{}] 执行异常: {}", workerName, e.getMessage(), e);
+            reply = Msg.assistantText(String.format(
+                    "工作者 %s 执行过程中发生异常：%s。任务未完成，请重新分配或调整指令。",
+                    workerName, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+        }
 
         long duration = System.currentTimeMillis() - startTime;
-        progressTracker.onWorkerComplete(workerName, true, duration);
+        progressTracker.onWorkerComplete(workerName, success, duration);
 
         // 自动保存工作者知识到共享知识库
         if (knowledgeBase != null) {

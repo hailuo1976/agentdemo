@@ -46,8 +46,8 @@ public class CodeExecutionManager {
     /** 执行工作目录 */
     private final Path workingDirectory;
 
-    /** 执行超时（秒） */
-    private final long timeoutSeconds;
+    /** 执行超时（秒；volatile：REPL /config set 可运行期修改） */
+    private volatile long timeoutSeconds;
 
     public CodeExecutionManager(Path workingDirectory) {
         this(workingDirectory, DEFAULT_TIMEOUT_SECONDS);
@@ -56,9 +56,26 @@ public class CodeExecutionManager {
     public CodeExecutionManager(Path workingDirectory, long timeoutSeconds) {
         this.workingDirectory = workingDirectory != null ? workingDirectory : Path.of(".");
         this.workingDirectory.toFile().mkdirs();
-        this.timeoutSeconds = timeoutSeconds;
+        this.timeoutSeconds = timeoutSeconds > 0 ? timeoutSeconds : DEFAULT_TIMEOUT_SECONDS;
         this.safetyChecker = new CommandSafetyChecker();
         log.info("代码执行管理器已初始化: workDir={}, timeout={}s, python={}", this.workingDirectory, timeoutSeconds, PYTHON_CMD);
+    }
+
+    /**
+     * 运行期更新执行超时（由 REPL /config set 经主应用透传）。
+     *
+     * @param seconds 新的超时秒数，&lt;=0 将被忽略
+     */
+    public void updateTimeoutSeconds(long seconds) {
+        if (seconds <= 0) {
+            log.debug("updateTimeoutSeconds 收到非正值 {}，忽略", seconds);
+            return;
+        }
+        long old = this.timeoutSeconds;
+        this.timeoutSeconds = seconds;
+        if (old != seconds) {
+            log.info("代码执行超时已更新: {}s → {}s", old, seconds);
+        }
     }
 
     // ==================== 执行方法 ====================

@@ -97,8 +97,7 @@ public class ChatModel {
         } catch (IOException e) {
             log.error("聊天请求异常: provider={}, model={}", providerName, modelName, e);
             // 返回错误消息
-            return new Msg(UUID.randomUUID().toString(), "assistant",
-                    List.of(new ContentBlock.TextBlock("请求失败: " + e.getMessage())));
+            return Msg.assistantText("请求失败: " + e.getMessage());
         }
     }
 

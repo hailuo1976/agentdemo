@@ -405,6 +405,7 @@ public class ConsoleUI {
         System.out.println("  " + CYAN + "permission" + RESET + " - 显示权限规则");
         System.out.println("  " + CYAN + "verbosity" + RESET + "  - 调整界面信息详细程度");
         System.out.println("  " + CYAN + "/stock on|off" + RESET + " - 开启/关闭股票分析工具");
+        System.out.println("  " + CYAN + "/config" + RESET + "      - 查看/设置运行时限制（/config set maxIterations=30）");
         System.out.println("  " + CYAN + "help" + RESET + "       - 显示此帮助信息");
         System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
         System.out.println();

@@ -50,6 +50,18 @@ public class MCPClient {
         this.resultSummarizer = new ToolResultSummarizer();
     }
 
+    /**
+     * 透传更新工具结果摘要阈值（由 REPL /config set 经 Agent 触发）。
+     *
+     * @param threshold 触发摘要的字符数阈值，&lt;=0 表示不变
+     * @param maxLength 摘要最大长度，&lt;=0 表示不变
+     */
+    public void updateToolResultSummarizerLimits(int threshold, int maxLength) {
+        this.resultSummarizer.updateLimits(threshold, maxLength);
+        log.debug("MCPClient 工具结果摘要阈值已刷新: threshold={}, maxLength={}",
+                resultSummarizer.getSummaryThreshold(), resultSummarizer.getMaxSummaryLength());
+    }
+
     // ==================== 初始化 ====================
 
     /**

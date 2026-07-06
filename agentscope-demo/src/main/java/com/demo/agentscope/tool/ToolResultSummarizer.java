@@ -18,17 +18,48 @@ public class ToolResultSummarizer {
 
     private static final Logger log = LoggerFactory.getLogger(ToolResultSummarizer.class);
 
-    /** 触发摘要的字符数阈值 */
-    private static final int SUMMARY_THRESHOLD = 3000;
+    /** 触发摘要的字符数默认阈值（构造器未指定时使用）。 */
+    private static final int DEFAULT_SUMMARY_THRESHOLD = 3000;
 
-    /** 摘要最大长度 */
-    private static final int MAX_SUMMARY_LENGTH = 500;
+    /** 摘要默认最大长度（构造器未指定时使用）。 */
+    private static final int DEFAULT_MAX_SUMMARY_LENGTH = 500;
+
+    /** 触发摘要的字符数阈值（运行期可通过 {@link #updateLimits} 修改）。 */
+    private int summaryThreshold;
+
+    /** 摘要最大长度（运行期可通过 {@link #updateLimits} 修改）。 */
+    private int maxSummaryLength;
 
     /** 数值模式（用于检测数值数据） */
     private static final Pattern NUMBER_PATTERN = Pattern.compile("-?\\d+(?:\\.\\d+)?");
 
     /** CSV/表格模式 */
     private static final Pattern TABLE_PATTERN = Pattern.compile("(?:^|\\n)(?:[^,\\n]+,){2,}[^,\\n]+(?:\\n|$)");
+
+    public ToolResultSummarizer() {
+        this(DEFAULT_SUMMARY_THRESHOLD, DEFAULT_MAX_SUMMARY_LENGTH);
+    }
+
+    /**
+     * @param summaryThreshold 触发摘要的字符数阈值，&lt;=0 回退到默认
+     * @param maxSummaryLength 摘要最大长度，&lt;=0 回退到默认
+     */
+    public ToolResultSummarizer(int summaryThreshold, int maxSummaryLength) {
+        this.summaryThreshold = summaryThreshold > 0 ? summaryThreshold : DEFAULT_SUMMARY_THRESHOLD;
+        this.maxSummaryLength = maxSummaryLength > 0 ? maxSummaryLength : DEFAULT_MAX_SUMMARY_LENGTH;
+    }
+
+    /**
+     * 运行期更新阈值（由 REPL /config set 触发，经 Agent → MCPClient 透传）。
+     */
+    public void updateLimits(int summaryThreshold, int maxSummaryLength) {
+        if (summaryThreshold > 0) this.summaryThreshold = summaryThreshold;
+        if (maxSummaryLength > 0) this.maxSummaryLength = maxSummaryLength;
+    }
+
+    public int getSummaryThreshold() { return summaryThreshold; }
+
+    public int getMaxSummaryLength() { return maxSummaryLength; }
 
     /**
      * 对工具结果进行摘要（如果超过阈值）。
@@ -38,12 +69,12 @@ public class ToolResultSummarizer {
      * @return 摘要后的结果（如果未超过阈值则返回原始结果）
      */
     public String summarize(String toolName, String output) {
-        if (output == null || output.length() <= SUMMARY_THRESHOLD) {
+        if (output == null || output.length() <= summaryThreshold) {
             return output;
         }
 
         log.debug("工具 [{}] 结果超过阈值 {} 字符，开始摘要（原始长度: {}）",
-                toolName, SUMMARY_THRESHOLD, output.length());
+                toolName, summaryThreshold, output.length());
 
         String summary = switch (toolName) {
             case "execute_python" -> summarizePythonOutput(output);
@@ -56,7 +87,9 @@ public class ToolResultSummarizer {
         log.debug("工具 [{}] 摘要完成，摘要长度: {}，压缩率: {}%",
                 toolName, summary.length(), String.format("%.1f", compressionRate));
 
-        return summary;
+        return String.format(
+                "[此结果已被自动摘要，原始长度 %d 字符，可能丢失细节。如需精确数据请缩小查询范围重新调用]\n%s",
+                output.length(), summary);
     }
 
     /**
@@ -69,7 +102,7 @@ public class ToolResultSummarizer {
         String dataType = detectDataType(output);
         summary.append("数据类型: ").append(dataType).append("\n");
 
-        // 根据数据类型提取统计信息（避免重复正则扫描）
+        // 根据数据类型提取统计信息
         if ("数值数据".equals(dataType)) {
             summary.append(extractNumericStats(output));
         } else if ("表格数据".equals(dataType)) {
@@ -78,7 +111,7 @@ public class ToolResultSummarizer {
             summary.append(extractJsonInfo(output));
         } else {
             summary.append("内容预览:\n");
-            summary.append(truncate(output, MAX_SUMMARY_LENGTH));
+            summary.append(truncate(output, maxSummaryLength));
         }
 
         List<String> warnings = detectWarnings(output);
@@ -107,7 +140,7 @@ public class ToolResultSummarizer {
 
         // 内容预览
         summary.append("内容预览:\n");
-        summary.append(truncate(output, MAX_SUMMARY_LENGTH));
+        summary.append(truncate(output, maxSummaryLength));
 
         return summary.toString();
     }
@@ -125,7 +158,7 @@ public class ToolResultSummarizer {
         }
 
         summary.append("内容:\n");
-        summary.append(truncate(output, MAX_SUMMARY_LENGTH));
+        summary.append(truncate(output, maxSummaryLength));
 
         return summary.toString();
     }
@@ -138,7 +171,7 @@ public class ToolResultSummarizer {
         summary.append("[结果摘要]\n");
         summary.append(String.format("原始长度: %d 字符\n", output.length()));
         summary.append("内容:\n");
-        summary.append(truncate(output, MAX_SUMMARY_LENGTH));
+        summary.append(truncate(output, maxSummaryLength));
         return summary.toString();
     }
 

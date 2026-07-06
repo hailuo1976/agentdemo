@@ -28,8 +28,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <h3>预算配置</h3>
  * <ul>
- *   <li>默认 500_000 tokens（足够多轮 ReAct 循环）</li>
- *   <li>支持环境变量 {@code REPLY_BUDGET} 覆盖，例如 {@code REPLY_BUDGET=1000000}</li>
+ *   <li>预算由 {@code AgentLimits.replyBudgetTokens} 统一管理（默认 500_000）</li>
+ *   <li>运行期可通过 REPL {@code /config set replyBudgetTokens=N} 调整</li>
  * </ul>
  * </p>
  */
@@ -40,11 +40,8 @@ public class ReplyBudgetControlMiddleware implements Middleware {
     /** 默认预算上限（token 数） */
     private static final int DEFAULT_BUDGET = 500_000;
 
-    /** 环境变量名：用于覆盖默认预算 */
-    private static final String ENV_REPLY_BUDGET = "REPLY_BUDGET";
-
-    /** 预算上限 */
-    private final int budget;
+    /** 预算上限（volatile：REPL /config set 可运行期修改） */
+    private volatile int budget;
 
     /** 累计 token 用量 */
     private final AtomicInteger usedTokens;
@@ -55,31 +52,26 @@ public class ReplyBudgetControlMiddleware implements Middleware {
     /** 关联的事件流引用，用于预算超限时发射事件 */
     private volatile EventStream boundStream;
 
-    public ReplyBudgetControlMiddleware() {
-        this(resolveBudgetFromEnv());
-    }
-
     public ReplyBudgetControlMiddleware(int budget) {
-        this.budget = budget;
+        this.budget = budget > 0 ? budget : DEFAULT_BUDGET;
         this.usedTokens = new AtomicInteger(0);
         this.warnedFlag = new AtomicInteger(0);
     }
 
     /**
-     * 从环境变量读取预算，未设置或非法时返回默认值。
+     * 运行期更新预算上限（由 REPL /config set 经主应用透传）。
+     *
+     * @param newBudget 新的预算上限，&lt;=0 将被忽略
      */
-    private static int resolveBudgetFromEnv() {
-        String raw = System.getenv(ENV_REPLY_BUDGET);
-        if (raw == null || raw.isBlank()) {
-            return DEFAULT_BUDGET;
+    public void updateBudget(int newBudget) {
+        if (newBudget <= 0) {
+            log.debug("[BudgetControl] updateBudget 收到非正值 {}，忽略", newBudget);
+            return;
         }
-        try {
-            int parsed = Integer.parseInt(raw.trim());
-            return parsed > 0 ? parsed : DEFAULT_BUDGET;
-        } catch (NumberFormatException e) {
-            log.warn("[BudgetControl] 环境变量 {}={} 解析失败，使用默认预算 {}",
-                    ENV_REPLY_BUDGET, raw, DEFAULT_BUDGET);
-            return DEFAULT_BUDGET;
+        int old = this.budget;
+        this.budget = newBudget;
+        if (old != newBudget) {
+            log.info("[BudgetControl] 预算上限已更新: {} → {}", old, newBudget);
         }
     }
 

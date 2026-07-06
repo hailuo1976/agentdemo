@@ -67,6 +67,20 @@ public class Msg {
         this(id, role, content, null, null, null);
     }
 
+    /**
+     * 工厂方法：构造只含单个文本块的 assistant 消息。
+     * <p>
+     * 用于错误兜底、内部错误告知、状态查询等不需要工具调用/思考过程的简单回复。
+     * </p>
+     *
+     * @param text 文本内容
+     * @return 新建的 assistant 消息
+     */
+    public static Msg assistantText(String text) {
+        return new Msg(UUID.randomUUID().toString(), "assistant",
+                List.of(new ContentBlock.TextBlock(text)));
+    }
+
     // ==================== Getter ====================
 
     public String getId() {

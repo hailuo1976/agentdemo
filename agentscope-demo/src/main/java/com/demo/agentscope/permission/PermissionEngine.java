@@ -85,7 +85,7 @@ public class PermissionEngine {
 
         // 引擎2：模式引擎
         PermissionDecision modeDecision = checkMode(toolName, args);
-        if (modeDecision != PermissionDecision.ALLOW) {
+        if (!modeDecision.isAllowed()) {
             log.debug("模式引擎拦截: toolName={}, mode={}, decision={}", toolName, mode, modeDecision);
             return modeDecision;
         }
@@ -93,7 +93,7 @@ public class PermissionEngine {
         // 引擎3：内置检查引擎
         if (builtInChecksEnabled) {
             PermissionDecision builtInDecision = checkBuiltIn(toolName, args);
-            if (builtInDecision != PermissionDecision.ALLOW) {
+            if (!builtInDecision.isAllowed()) {
                 log.debug("内置检查引擎拦截: toolName={}, decision={}", toolName, builtInDecision);
                 return builtInDecision;
             }
@@ -145,7 +145,7 @@ public class PermissionEngine {
         if (mode == PermissionMode.EXPLORE) {
             // 探索模式：只读访问，拒绝所有写入类工具
             if (isWriteTool(toolName)) {
-                return PermissionDecision.DENY;
+                return PermissionDecision.deny("EXPLORE 模式禁止写入类工具: " + toolName);
             }
         }
 
@@ -195,7 +195,8 @@ public class PermissionEngine {
                 if (strValue.contains(pattern)) {
                     log.warn("内置检查发现危险命令模式: pattern={}, toolName={}, arg={}",
                             pattern, toolName, entry.getKey());
-                    return PermissionDecision.DENY;
+                    return PermissionDecision.deny("命中危险命令模式: " + pattern
+                            + "（参数 " + entry.getKey() + "）；如确需执行请调整参数或换用安全等价命令");
                 }
             }
 
@@ -204,7 +205,8 @@ public class PermissionEngine {
                 if (strValue.contains(pattern)) {
                     log.warn("内置检查发现危险路径模式: pattern={}, toolName={}, arg={}",
                             pattern, toolName, entry.getKey());
-                    return PermissionDecision.ASK;
+                    return PermissionDecision.ask("命中敏感路径模式: " + pattern
+                            + "（参数 " + entry.getKey() + "）；操作目标为系统目录，需人工确认");
                 }
             }
         }

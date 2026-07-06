@@ -76,6 +76,15 @@ public class Agent {
     /** 智能上下文管理器（可选） */
     private com.demo.agentscope.context.ContextManager contextManager;
 
+    /** 系统提示词生成器（可选；由 main 装配，支持运行期 regenerateSystemPrompt） */
+    private SystemPromptGenerator systemPromptGenerator;
+
+    /** 当前股票工具开关状态（由 main 装配，regenerateSystemPrompt 时使用） */
+    private boolean stockToolsEnabled;
+
+    /** Token 预算中间件引用（可选；由 main 装配用于运行期注入告警与查询用量） */
+    private com.demo.agentscope.middleware.ReplyBudgetControlMiddleware replyBudgetMiddleware;
+
     /** 智能体状态（等价于 AgentState） */
     private final Map<String, Object> agentState;
 
@@ -84,6 +93,9 @@ public class Agent {
 
     /** 最大工具调用迭代次数 */
     private int maxIterations;
+
+    /** 运行时限制引用（迭代/token 预算告警读取此实例） */
+    private com.demo.agentscope.config.AgentLimits limits;
 
     /** 进度跟踪器（每次 reply 时按当前 verbosity 重建） */
     private AgentProgressTracker progressTracker;
@@ -169,13 +181,16 @@ public class Agent {
                 progressTracker.onModelCallStart();
 
                 // 构建发送给模型的消息列表
-                List<Msg> messages = buildMessages();
+                List<Msg> messages = buildMessages(iteration);
 
                 // 上下文压缩:工具密集对话时,把早期 tool_call.arguments / tool_result.content
                 // 替换为 stub,避免 8K+ 字符的 Python 脚本被每轮重发(参考 Claude Code microCompact)
                 // 注意:必须在 buildMessages() 之后调用 —— messages 是 context 的别名视图,
                 // 修改 context 内的 block 会被下一轮 buildMessages() 反映到请求体
-                int compactedCount = com.demo.agentscope.context.MicroCompactor.compactIfNeeded(context);
+                int compactedCount = com.demo.agentscope.context.MicroCompactor.compactIfNeeded(
+                        context,
+                        contextManager != null ? contextManager.getMicroCompactorKeepRecent() : 5,
+                        contextManager != null ? contextManager.getMicroCompactorTriggerToolCount() : 12);
 
                 // 获取可用工具列表
                 List<MCPClient.ToolInfo> tools = mcpClient.listTools();
@@ -227,15 +242,8 @@ public class Agent {
                     // 权限检查
                     Map<String, Object> toolArgs = parseToolArguments(toolCall.getArguments());
                     var decision = permissionEngine.check(toolCall.getName(), toolArgs);
-                    if (decision == com.demo.agentscope.permission.PermissionDecision.DENY) {
-                        log.warn("工具 [{}] 被权限引擎拒绝", toolCall.getName());
-                        ContentBlock.ToolResultBlock deniedResult = new ContentBlock.ToolResultBlock(
-                                toolCall.getId(), "权限拒绝: 工具 " + toolCall.getName() + " 被禁止执行", true);
-                        Msg toolResultMsg = buildToolResultMsg(deniedResult);
-                        context.add(toolResultMsg);
-                        middlewareChain.fireToolResult(ctx, deniedResult);
-                        eventStream.emit(AgentEvent.toolResult(id, toolCall.getName(), "权限拒绝"));
-                        progressTracker.onToolCallComplete(toolCall.getName(), false, 0);
+                    if (decision.isDenied()) {
+                        handlePermissionDenied(ctx, toolCall, decision.getReason());
                         continue;
                     }
 
@@ -266,17 +274,19 @@ public class Agent {
 
             // 如果达到最大迭代次数仍未获得最终答案
             if (finalResponse == null) {
-                String warning = "已达到最大迭代次数 (" + maxIterations + ")，无法完成所有工具调用";
+                int toolCallCount = countToolCallsSoFar(context);
+                String warning = String.format(
+                        "已达到最大迭代次数上限（%d 轮）。本次对话执行了 %d 次工具调用，由于预算耗尽无法继续。" +
+                        "建议：①重启对话并简化任务；②拆分为多个子任务；③如需继续当前任务，请基于以上进度重新提问。",
+                        maxIterations, toolCallCount);
                 log.warn("智能体 [{}]: {}", name, warning);
-                finalResponse = new Msg(UUID.randomUUID().toString(), "assistant",
-                        List.of(new ContentBlock.TextBlock(warning)));
+                finalResponse = Msg.assistantText(warning);
                 context.add(finalResponse);
             }
         } catch (Exception e) {
             log.error("智能体 [{}] 回复过程异常", name, e);
             progressTracker.onError(e.getMessage());
-            finalResponse = new Msg(UUID.randomUUID().toString(), "assistant",
-                    List.of(new ContentBlock.TextBlock("处理过程中发生错误: " + e.getMessage())));
+            finalResponse = Msg.assistantText("处理过程中发生错误: " + e.getMessage());
             eventStream.emit(AgentEvent.error(id, e.getMessage()));
         }
 
@@ -302,8 +312,7 @@ public class Agent {
      * 流式回复的同步包装：调用 {@link #replyStream}，完成后返回最终 assistant 消息。
      *
      * @param userInput 用户输入文本
-     * @return 最终 assistant 回复消息
-     * @throws IllegalStateException 若 {@link #replyStream} 未向 context 追加 assistant 消息（异常路径）
+     * @return 最终 assistant 回复消息；若 {@link #replyStream} 异常结束未追加 assistant，返回携带错误说明的 assistant Msg（不抛异常）
      */
     public Msg replySyncFromStream(String userInput) {
         int contextSizeBefore = context.size();
@@ -315,9 +324,10 @@ public class Agent {
                 return m;
             }
         }
-        throw new IllegalStateException(
-                "replyStream 未追加 assistant 消息：contextSizeBefore=" + contextSizeBefore
-                        + ", contextSizeAfter=" + context.size());
+        log.warn("replyStream 未追加 assistant 消息: before={}, after={}",
+                contextSizeBefore, context.size());
+        return Msg.assistantText(
+                "[内部错误] replyStream 未产生 assistant 回复。可能原因：模型调用失败、迭代预算耗尽未输出。");
     }
 
     /**
@@ -360,10 +370,13 @@ public class Agent {
                 // 进度跟踪：模型调用开始
                 progressTracker.onModelCallStart();
 
-                List<Msg> messages = buildMessages();
+                List<Msg> messages = buildMessages(iteration);
 
                 // 上下文压缩（与 reply() 一致）
-                int compactedCount = com.demo.agentscope.context.MicroCompactor.compactIfNeeded(context);
+                int compactedCount = com.demo.agentscope.context.MicroCompactor.compactIfNeeded(
+                        context,
+                        contextManager != null ? contextManager.getMicroCompactorKeepRecent() : 5,
+                        contextManager != null ? contextManager.getMicroCompactorTriggerToolCount() : 12);
 
                 List<MCPClient.ToolInfo> tools = mcpClient.listTools();
 
@@ -402,15 +415,8 @@ public class Agent {
                     // 权限检查（与 reply() 一致）
                     Map<String, Object> toolArgs = parseToolArguments(toolCall.getArguments());
                     var decision = permissionEngine.check(toolCall.getName(), toolArgs);
-                    if (decision == com.demo.agentscope.permission.PermissionDecision.DENY) {
-                        log.warn("工具 [{}] 被权限引擎拒绝", toolCall.getName());
-                        ContentBlock.ToolResultBlock deniedResult = new ContentBlock.ToolResultBlock(
-                                toolCall.getId(), "权限拒绝: 工具 " + toolCall.getName() + " 被禁止执行", true);
-                        Msg toolResultMsg = buildToolResultMsg(deniedResult);
-                        context.add(toolResultMsg);
-                        middlewareChain.fireToolResult(ctx, deniedResult);
-                        eventStream.emit(AgentEvent.toolResult(id, toolCall.getName(), "权限拒绝"));
-                        progressTracker.onToolCallComplete(toolCall.getName(), false, 0);
+                    if (decision.isDenied()) {
+                        handlePermissionDenied(ctx, toolCall, decision.getReason());
                         continue;
                     }
 
@@ -539,27 +545,96 @@ public class Agent {
 
     /**
      * 构建发送给模型的消息列表（包含系统提示词和上下文历史）。
+     * <p>
+     * 当接近迭代或 token 预算上限时，会在 system 之后插入一条 user 角色的预算告警，
+     * 让模型感知紧迫感、主动收敛。告警消息只注入到本次调用的返回列表，
+     * 不写入 context 字段，因此不污染对话历史与短期记忆。
+     * </p>
      */
-    private List<Msg> buildMessages() {
+    private List<Msg> buildMessages(int iteration) {
+        List<Msg> messages;
         // 如果启用了智能上下文管理器，使用它来构建上下文
         if (contextManager != null) {
             String lastUserQuery = getLastUserQuery();
-            return contextManager.buildContext(lastUserQuery, context);
+            messages = contextManager.buildContext(lastUserQuery, context);
+        } else {
+            // 否则使用简单的上下文构建方式
+            messages = new ArrayList<>();
+            // 系统提示词
+            if (systemPrompt != null && !systemPrompt.isBlank()) {
+                Msg systemMsg = new Msg(UUID.randomUUID().toString(), "system",
+                        List.of(new ContentBlock.TextBlock(systemPrompt)));
+                messages.add(systemMsg);
+            }
+            // 对话历史
+            messages.addAll(context);
         }
 
-        // 否则使用简单的上下文构建方式
-        List<Msg> messages = new ArrayList<>();
-
-        // 系统提示词
-        if (systemPrompt != null && !systemPrompt.isBlank()) {
-            Msg systemMsg = new Msg(UUID.randomUUID().toString(), "system",
-                    List.of(new ContentBlock.TextBlock(systemPrompt)));
-            messages.add(systemMsg);
+        // 预算告警注入位置：system 之后、其它消息之前
+        Msg budgetWarning = buildBudgetWarningIfAny(iteration);
+        if (budgetWarning != null) {
+            int insertAt = findFirstNonSystemIndex(messages) ;
+            messages.add(Math.max(insertAt, 0), budgetWarning);
         }
-
-        // 对话历史
-        messages.addAll(context);
         return messages;
+    }
+
+    /**
+     * 找到第一条非 system 角色消息的索引（用于把告警插入到 system 之后）。
+     * 若列表为空或全是 system，返回 size（即追加到末尾）。
+     */
+    private int findFirstNonSystemIndex(List<Msg> messages) {
+        for (int i = 0; i < messages.size(); i++) {
+            if (!"system".equals(messages.get(i).getRole())) {
+                return i;
+            }
+        }
+        return messages.size();
+    }
+
+    /**
+     * 检查是否需要注入预算告警（迭代 + token 双维度）。
+     *
+     * @return user 角色告警 Msg，或 null 表示无需告警
+     */
+    private Msg buildBudgetWarningIfAny(int iteration) {
+        if (limits == null) {
+            return null;
+        }
+        String iterationWarning = null;
+        int warnRemaining = limits.getIterationWarnRemaining();
+        if (warnRemaining > 0 && iteration >= 0) {
+            int remaining = maxIterations - iteration - 1;
+            if (remaining <= warnRemaining) {
+                iterationWarning = String.format(
+                        "迭代预算紧张：剩余 %d/%d 轮（告警阈值 %d）。请评估是否能在剩余轮次内收敛；" +
+                        "若不能，请优先产出阶段性结论与未完成项，让用户决定下一步。",
+                        remaining, maxIterations, warnRemaining);
+            }
+        }
+
+        String tokenWarning = null;
+        if (replyBudgetMiddleware != null) {
+            int budgetUsed = replyBudgetMiddleware.getUsedTokens();
+            int budgetLimit = limits.getReplyBudgetTokens();
+            int warnPercent = limits.getTokenBudgetWarnPercent();
+            if (budgetLimit > 0 && warnPercent > 0 && budgetUsed * 100 >= (long) budgetLimit * warnPercent) {
+                tokenWarning = String.format(
+                        "Token 预算紧张：已用 %d/%d（%.0f%%）。请尽快收敛输出，" +
+                        "优先完成核心结论，省略冗余探索。",
+                        budgetUsed, budgetLimit, budgetUsed * 100.0 / budgetLimit);
+            }
+        }
+
+        if (iterationWarning == null && tokenWarning == null) {
+            return null;
+        }
+        String combined = "[系统提示] " +
+                (iterationWarning != null && tokenWarning != null
+                        ? iterationWarning + " " + tokenWarning
+                        : (iterationWarning != null ? iterationWarning : tokenWarning));
+        return new Msg(UUID.randomUUID().toString(), "user",
+                List.of(new ContentBlock.TextBlock(combined)));
     }
 
     /**
@@ -606,6 +681,27 @@ public class Agent {
      */
     private Msg buildToolResultMsg(ContentBlock.ToolResultBlock resultBlock) {
         return new Msg(UUID.randomUUID().toString(), "tool", List.of(resultBlock));
+    }
+
+    /**
+     * 处理权限拒绝：构造错误 tool result，并经中间件 + 事件流 + 进度跟踪反馈给模型与用户。
+     */
+    private void handlePermissionDenied(AgentContext ctx,
+                                        ContentBlock.ToolCallBlock toolCall,
+                                        String reason) {
+        log.warn("工具 [{}] 被权限引擎拒绝: {}", toolCall.getName(), reason);
+        String denyMsg = String.format(
+                "权限拒绝: 工具 %s 被禁止执行。原因：%s。\n" +
+                "你可以：①调整参数规避命中规则；②换用其他允许的工具；" +
+                "③如认为该能力必需，请停止并向用户说明。",
+                toolCall.getName(), reason != null ? reason : "未指定");
+        ContentBlock.ToolResultBlock deniedResult = new ContentBlock.ToolResultBlock(
+                toolCall.getId(), denyMsg, true);
+        Msg toolResultMsg = buildToolResultMsg(deniedResult);
+        context.add(toolResultMsg);
+        middlewareChain.fireToolResult(ctx, deniedResult);
+        eventStream.emit(AgentEvent.toolResult(id, toolCall.getName(), "权限拒绝"));
+        progressTracker.onToolCallComplete(toolCall.getName(), false, 0);
     }
 
     // ==================== 状态管理 ====================
@@ -708,7 +804,22 @@ public class Agent {
     }
 
     public void setMaxIterations(int maxIterations) {
+        if (maxIterations <= 0) {
+            throw new IllegalArgumentException("maxIterations 必须为正");
+        }
         this.maxIterations = maxIterations;
+    }
+
+    /**
+     * 注入运行时限制引用。
+     * <p>
+     * 由主应用装配时调用。{@code buildMessages} 会从中读取
+     * {@code iterationWarnRemaining} / {@code replyBudgetTokens} /
+     * {@code tokenBudgetWarnPercent}，决定是否注入预算告警。
+     * </p>
+     */
+    public void setLimits(com.demo.agentscope.config.AgentLimits limits) {
+        this.limits = limits;
     }
 
     /**
@@ -724,5 +835,63 @@ public class Agent {
      */
     public com.demo.agentscope.context.ContextManager getContextManager() {
         return contextManager;
+    }
+
+    // ==================== 运行时配置 ====================
+
+    /**
+     * 注入系统提示词生成器与股票工具开关状态。
+     * <p>
+     * 由主应用装配时调用，使后续 {@link #regenerateSystemPrompt} 能在 REPL /config set 后
+     * 基于最新 {@link com.demo.agentscope.config.AgentLimits} 重建系统提示词。
+     * </p>
+     */
+    public void setSystemPromptGenerator(SystemPromptGenerator generator, boolean stockEnabled) {
+        this.systemPromptGenerator = generator;
+        this.stockToolsEnabled = stockEnabled;
+    }
+
+    /**
+     * 重建系统提示词（由 REPL /config set 触发，经主应用透传）。
+     *
+     * @param stockEnabled 当前股票工具开关
+     * @param limits       当前运行时限制
+     */
+    public void regenerateSystemPrompt(boolean stockEnabled,
+                                        com.demo.agentscope.config.AgentLimits limits) {
+        this.stockToolsEnabled = stockEnabled;
+        if (systemPromptGenerator != null && limits != null) {
+            String refreshed = systemPromptGenerator.generate(stockEnabled, limits);
+            this.systemPrompt = refreshed;
+            if (contextManager != null) {
+                contextManager.setSystemPrompt(refreshed);
+            }
+            log.info("智能体 [{}] 系统提示词已重建（stock={}, maxIterations={}）",
+                    name, stockEnabled, limits.getMaxIterations());
+        } else {
+            log.debug("智能体 [{}] 未注入 SystemPromptGenerator，跳过 regenerateSystemPrompt", name);
+        }
+    }
+
+    /**
+     * 注入 Token 预算中间件引用（供 buildMessages 在接近预算时注入告警）。
+     */
+    public void setReplyBudgetMiddleware(
+            com.demo.agentscope.middleware.ReplyBudgetControlMiddleware middleware) {
+        this.replyBudgetMiddleware = middleware;
+    }
+
+    public com.demo.agentscope.middleware.ReplyBudgetControlMiddleware getReplyBudgetMiddleware() {
+        return replyBudgetMiddleware;
+    }
+
+    /**
+     * 透传更新工具结果摘要阈值（由 REPL /config set 触发，经 MCPClient 传播）。
+     */
+    public void setToolResultSummaryLimits(int threshold, int maxLength) {
+        if (mcpClient == null) {
+            return;
+        }
+        mcpClient.updateToolResultSummarizerLimits(threshold, maxLength);
     }
 }

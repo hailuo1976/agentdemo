@@ -23,20 +23,20 @@ import java.util.UUID;
  * </p>
  */
 public class ContextManager {
-    
+
     private static final Logger log = LoggerFactory.getLogger(ContextManager.class);
-    
+
     /** 默认最大上下文 token 数（构造器未指定时使用）。 */
     private static final int DEFAULT_MAX_CONTEXT_TOKENS = 40000;
 
-    /** 最大保留的最近消息数 */
-    private static final int MAX_RECENT_MESSAGES = 10;
+    /** 最大保留的最近消息数（构造器未指定时使用）。 */
+    private static final int DEFAULT_MAX_RECENT_MESSAGES = 10;
 
-    /** 短期记忆检索数量 */
-    private static final int SHORT_TERM_MEMORY_LIMIT = 3;
+    /** 短期记忆检索数量（构造器未指定时使用）。 */
+    private static final int DEFAULT_SHORT_TERM_MEMORY_LIMIT = 3;
 
-    /** 长期记忆检索数量 */
-    private static final int LONG_TERM_MEMORY_LIMIT = 2;
+    /** 长期记忆检索数量（构造器未指定时使用）。 */
+    private static final int DEFAULT_LONG_TERM_MEMORY_LIMIT = 2;
 
     /** 短期记忆 */
     private final ShortTermMemory shortTermMemory;
@@ -50,8 +50,23 @@ public class ContextManager {
     /** 压缩摘要 */
     private String compressedSummary;
 
-    /** 触发压缩的 token 阈值 */
-    private final int maxContextTokens;
+    /** 触发压缩的 token 阈值（运行期可通过 {@link #updateLimits} 修改）。 */
+    private int maxContextTokens;
+
+    /** 滑动窗口保留的最近消息数。 */
+    private int maxRecentMessages;
+
+    /** 短期记忆召回条数。 */
+    private int shortTermMemoryLimit;
+
+    /** 长期记忆召回条数。 */
+    private int longTermMemoryLimit;
+
+    /** MicroCompactor 保留的最近工具调用数。 */
+    private int microCompactorKeepRecent;
+
+    /** MicroCompactor 触发压缩的工具调用次数。 */
+    private int microCompactorTriggerToolCount;
 
     public ContextManager(ShortTermMemory shortTermMemory, String systemPrompt) {
         this(shortTermMemory, systemPrompt, DEFAULT_MAX_CONTEXT_TOKENS);
@@ -61,9 +76,65 @@ public class ContextManager {
      * @param maxContextTokens 触发压缩的 token 阈值，&lt;=0 时回退到默认值
      */
     public ContextManager(ShortTermMemory shortTermMemory, String systemPrompt, int maxContextTokens) {
+        this(shortTermMemory, systemPrompt, maxContextTokens,
+                DEFAULT_MAX_RECENT_MESSAGES,
+                DEFAULT_SHORT_TERM_MEMORY_LIMIT,
+                DEFAULT_LONG_TERM_MEMORY_LIMIT);
+    }
+
+    /**
+     * 全参数构造器，所有数值均由 {@link com.demo.agentscope.config.AgentLimits} 提供。
+     */
+    public ContextManager(ShortTermMemory shortTermMemory, String systemPrompt,
+                           int maxContextTokens, int maxRecentMessages,
+                           int shortTermMemoryLimit, int longTermMemoryLimit) {
         this.shortTermMemory = shortTermMemory;
         this.systemPrompt = systemPrompt;
         this.maxContextTokens = maxContextTokens > 0 ? maxContextTokens : DEFAULT_MAX_CONTEXT_TOKENS;
+        this.maxRecentMessages = maxRecentMessages > 0 ? maxRecentMessages : DEFAULT_MAX_RECENT_MESSAGES;
+        this.shortTermMemoryLimit = Math.max(0, shortTermMemoryLimit);
+        this.longTermMemoryLimit = Math.max(0, longTermMemoryLimit);
+        // MicroCompactor 默认值，可由 setMicroCompactorLimits 覆盖
+        this.microCompactorKeepRecent = 5;
+        this.microCompactorTriggerToolCount = 12;
+    }
+
+    /**
+     * 运行期更新所有限制（由 REPL /config set 触发）。
+     */
+    public void updateLimits(int maxContextTokens, int maxRecentMessages,
+                              int shortTermMemoryLimit, int longTermMemoryLimit,
+                              int microCompactorKeepRecent, int microCompactorTriggerToolCount) {
+        if (maxContextTokens > 0) this.maxContextTokens = maxContextTokens;
+        if (maxRecentMessages > 0) this.maxRecentMessages = maxRecentMessages;
+        if (shortTermMemoryLimit >= 0) this.shortTermMemoryLimit = shortTermMemoryLimit;
+        if (longTermMemoryLimit >= 0) this.longTermMemoryLimit = longTermMemoryLimit;
+        if (microCompactorKeepRecent > 0) this.microCompactorKeepRecent = microCompactorKeepRecent;
+        if (microCompactorTriggerToolCount > 0) this.microCompactorTriggerToolCount = microCompactorTriggerToolCount;
+        log.debug("ContextManager 限制已刷新: maxContextTokens={}, maxRecentMessages={}, stm={}, ltm={}, mc.keep={}, mc.trigger={}",
+                this.maxContextTokens, this.maxRecentMessages, this.shortTermMemoryLimit,
+                this.longTermMemoryLimit, this.microCompactorKeepRecent, this.microCompactorTriggerToolCount);
+    }
+
+    /**
+     * 单独设置 MicroCompactor 参数（启动期装配时使用）。
+     */
+    public void setMicroCompactorLimits(int keepRecent, int triggerToolCount) {
+        if (keepRecent > 0) this.microCompactorKeepRecent = keepRecent;
+        if (triggerToolCount > 0) this.microCompactorTriggerToolCount = triggerToolCount;
+    }
+
+    public int getMicroCompactorKeepRecent() { return microCompactorKeepRecent; }
+
+    public int getMicroCompactorTriggerToolCount() { return microCompactorTriggerToolCount; }
+
+    /**
+     * 替换系统提示词（由 Agent.regenerateSystemPrompt 触发）。
+     */
+    public void setSystemPrompt(String systemPrompt) {
+        this.systemPrompt = systemPrompt;
+        log.debug("ContextManager 系统提示词已更新，长度: {}",
+                systemPrompt != null ? systemPrompt.length() : 0);
     }
 
     /**
@@ -116,16 +187,16 @@ public class ContextManager {
         if (currentQuery != null) {
             // 3.1 短期记忆
             if (shortTermMemory != null) {
-                List<MemoryEntry> shortTermMemories = shortTermMemory.recall(currentQuery, SHORT_TERM_MEMORY_LIMIT);
+                List<MemoryEntry> shortTermMemories = shortTermMemory.recall(currentQuery, shortTermMemoryLimit);
                 for (MemoryEntry memory : shortTermMemories) {
                     String memoryText = formatMemoryAsText(memory, "短期");
                     systemContentBuilder.append(memoryText).append("\n");
                 }
             }
-            
+
             // 3.2 长期记忆
             if (longTermMemory != null) {
-                List<MemoryEntry> longTermMemories = longTermMemory.recall(currentQuery, LONG_TERM_MEMORY_LIMIT);
+                List<MemoryEntry> longTermMemories = longTermMemory.recall(currentQuery, longTermMemoryLimit);
                 for (MemoryEntry memory : longTermMemories) {
                     String memoryText = formatMemoryAsText(memory, "长期");
                     systemContentBuilder.append(memoryText).append("\n");
@@ -213,7 +284,7 @@ public class ContextManager {
         }
 
         // 计算窗口起点
-        int recentCount = Math.min(MAX_RECENT_MESSAGES, context.size());
+        int recentCount = Math.min(maxRecentMessages, context.size());
         int startIndex = Math.max(0, context.size() - recentCount);
 
         // 钉住最近的 user 消息：GLM/OpenAI 协议要求 messages 序列必须含 user 角色。

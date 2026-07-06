@@ -54,11 +54,11 @@ public final class MicroCompactor {
     private static final String CLEARED_TOOL_RESULT =
             "[已压缩:旧工具结果]";
 
-    /** 保留最近 N 轮 tool_call 的原值,确保模型对当前任务推理无损。 */
-    private static final int KEEP_RECENT = 5;
+    /** 保留最近 N 轮 tool_call 的原值默认值（可由调用方覆盖）。 */
+    private static final int DEFAULT_KEEP_RECENT = 5;
 
-    /** 累计可压缩 tool_call 达到此阈值才开始压缩(避免短对话也触发)。 */
-    private static final int TRIGGER_TOOL_COUNT = 12;
+    /** 累计可压缩 tool_call 达到此阈值才开始压缩（默认值，可由调用方覆盖）。 */
+    private static final int DEFAULT_TRIGGER_TOOL_COUNT = 12;
 
     private MicroCompactor() {
     }
@@ -70,18 +70,27 @@ public final class MicroCompactor {
      * @return 被压缩的工具调用数量(0 表示未触发)
      */
     public static int compactIfNeeded(List<Msg> context) {
+        return compactIfNeeded(context, DEFAULT_KEEP_RECENT, DEFAULT_TRIGGER_TOOL_COUNT);
+    }
+
+    /**
+     * 带参数版本的压缩入口，由 {@link ContextManager} 装配时传入 limits。
+     */
+    public static int compactIfNeeded(List<Msg> context, int keepRecent, int triggerToolCount) {
         if (context == null || context.isEmpty()) {
             return 0;
         }
+        int effectiveKeep = keepRecent > 0 ? keepRecent : DEFAULT_KEEP_RECENT;
+        int effectiveTrigger = triggerToolCount > 0 ? triggerToolCount : DEFAULT_TRIGGER_TOOL_COUNT;
 
         List<ToolUseSite> sites = collectCompactableSites(context);
-        if (sites.size() < TRIGGER_TOOL_COUNT) {
+        if (sites.size() < effectiveTrigger) {
             return 0;
         }
 
-        // 保留最后 KEEP_RECENT 个 tool_use.id 的原值,其余替换
+        // 保留最后 effectiveKeep 个 tool_use.id 的原值,其余替换
         Set<String> keepIds = new HashSet<>();
-        int startKeep = sites.size() - KEEP_RECENT;
+        int startKeep = sites.size() - effectiveKeep;
         for (int i = Math.max(0, startKeep); i < sites.size(); i++) {
             keepIds.add(sites.get(i).toolCallId);
         }
@@ -98,7 +107,7 @@ public final class MicroCompactor {
 
         if (compactedCount > 0) {
             log.debug("microCompact: 压缩 {} 个旧工具调用(共 {} 个白名单工具,保留最近 {})",
-                    compactedCount, sites.size(), KEEP_RECENT);
+                    compactedCount, sites.size(), effectiveKeep);
         }
         return compactedCount;
     }

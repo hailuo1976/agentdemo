@@ -52,20 +52,20 @@ public class PermissionMiddleware implements Middleware {
 
         log.debug("权限中间件检查: toolName={}, decision={}", toolName, decision);
 
-        switch (decision) {
+        switch (decision.getType()) {
             case ALLOW -> {
                 // 允许执行，放行
                 log.debug("权限中间件放行: toolName={}", toolName);
             }
             case DENY -> {
-                // 拒绝执行，抛出异常
-                String reason = "权限引擎判定拒绝";
+                // 拒绝执行，抛出异常（携带引擎给出的具体原因）
+                String reason = decision.getReason() != null ? decision.getReason() : "权限引擎判定拒绝";
                 log.warn("权限中间件拒绝: toolName={}, reason={}", toolName, reason);
                 throw new PermissionDeniedException(toolName, reason);
             }
             case ASK -> {
                 // 需要人工确认
-                String reason = "权限引擎需要人工确认";
+                String reason = decision.getReason() != null ? decision.getReason() : "权限引擎需要人工确认";
                 log.info("权限中间件询问: toolName={}, reason={}", toolName, reason);
 
                 // 发射权限询问事件
@@ -73,7 +73,7 @@ public class PermissionMiddleware implements Middleware {
 
                 // 演示环境下自动拒绝（实际应用中应暂停等待人工确认）
                 log.warn("演示环境自动拒绝 ASK 决策: toolName={}", toolName);
-                throw new PermissionDeniedException(toolName, "需要人工确认（演示环境自动拒绝）");
+                throw new PermissionDeniedException(toolName, reason + "（需人工确认；演示环境自动拒绝）");
             }
         }
     }

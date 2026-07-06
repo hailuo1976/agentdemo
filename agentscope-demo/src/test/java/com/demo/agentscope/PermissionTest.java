@@ -33,16 +33,18 @@ class PermissionTest {
         engine.addRule(new PermissionRule("get_weather", PermissionDecision.ALLOW, "天气查询安全"));
 
         PermissionDecision decision = engine.check("get_weather", Map.of("city", "Beijing"));
-        assertEquals(PermissionDecision.ALLOW, decision);
+        assertTrue(decision.isAllowed());
     }
 
     @Test
-    @DisplayName("显式规则拒绝 delete_file → DENY")
+    @DisplayName("显式规则拒绝 delete_file → DENY（携带 reason）")
     void explicitRuleDeniesDeleteFile() {
-        engine.addRule(new PermissionRule("delete_file", PermissionDecision.DENY, "禁止删除文件"));
+        engine.addRule(new PermissionRule("delete_file",
+                PermissionDecision.deny("禁止删除文件"), "禁止删除文件"));
 
         PermissionDecision decision = engine.check("delete_file", Map.of("path", "/tmp/test.txt"));
-        assertEquals(PermissionDecision.DENY, decision);
+        assertTrue(decision.isDenied());
+        assertNotNull(decision.getReason());
     }
 
     @Test
@@ -53,31 +55,36 @@ class PermissionTest {
         engine.addRule(new PermissionRule("write_file", PermissionDecision.ALLOW, "明确允许"));
 
         PermissionDecision decision = engine.check("write_file", Map.of("path", "test.txt"));
-        assertEquals(PermissionDecision.ALLOW, decision);
+        assertTrue(decision.isAllowed());
     }
 
     @Test
     @DisplayName("bypassImmune 规则在 BYPASS 模式下依然生效")
     void bypassImmuneRuleSurvivesBypassMode() {
-        engine.addRule(new PermissionRule("dangerous_tool", PermissionDecision.DENY, "不可绕过的安全规则", true));
+        engine.addRule(new PermissionRule("dangerous_tool",
+                PermissionDecision.deny("不可绕过的安全规则"),
+                "不可绕过的安全规则", true));
         engine.setMode(PermissionMode.BYPASS);
 
         PermissionDecision decision = engine.check("dangerous_tool", Map.of());
-        assertEquals(PermissionDecision.DENY, decision);
+        assertTrue(decision.isDenied());
     }
 
     // ==================== 模式引擎测试 ====================
 
     @Test
-    @DisplayName("EXPLORE 模式拒绝写入类工具")
+    @DisplayName("EXPLORE 模式拒绝写入类工具（携带原因说明）")
     void exploreModeDeniesWriteTools() {
         engine.setMode(PermissionMode.EXPLORE);
 
-        assertEquals(PermissionDecision.DENY, engine.check("write_file", Map.of()));
-        assertEquals(PermissionDecision.DENY, engine.check("delete_record", Map.of()));
-        assertEquals(PermissionDecision.DENY, engine.check("execute_script", Map.of()));
-        assertEquals(PermissionDecision.DENY, engine.check("run_command", Map.of()));
-        assertEquals(PermissionDecision.DENY, engine.check("bash_script", Map.of()));
+        PermissionDecision d1 = engine.check("write_file", Map.of());
+        assertTrue(d1.isDenied());
+        assertNotNull(d1.getReason());
+
+        assertTrue(engine.check("delete_record", Map.of()).isDenied());
+        assertTrue(engine.check("execute_script", Map.of()).isDenied());
+        assertTrue(engine.check("run_command", Map.of()).isDenied());
+        assertTrue(engine.check("bash_script", Map.of()).isDenied());
     }
 
     @Test
@@ -85,9 +92,9 @@ class PermissionTest {
     void exploreModeAllowsReadTools() {
         engine.setMode(PermissionMode.EXPLORE);
 
-        assertEquals(PermissionDecision.ALLOW, engine.check("get_weather", Map.of()));
-        assertEquals(PermissionDecision.ALLOW, engine.check("read_file", Map.of()));
-        assertEquals(PermissionDecision.ALLOW, engine.check("search", Map.of()));
+        assertTrue(engine.check("get_weather", Map.of()).isAllowed());
+        assertTrue(engine.check("read_file", Map.of()).isAllowed());
+        assertTrue(engine.check("search", Map.of()).isAllowed());
     }
 
     @Test
@@ -96,7 +103,7 @@ class PermissionTest {
         engine.setMode(PermissionMode.DONT_ASK);
 
         PermissionDecision decision = engine.check("get_weather", Map.of("city", "Beijing"));
-        assertEquals(PermissionDecision.ALLOW, decision);
+        assertTrue(decision.isAllowed());
     }
 
     @Test
@@ -104,27 +111,31 @@ class PermissionTest {
     void bypassModeAllowsAllNonImmuneTools() {
         engine.setMode(PermissionMode.BYPASS);
 
-        assertEquals(PermissionDecision.ALLOW, engine.check("write_file", Map.of()));
-        assertEquals(PermissionDecision.ALLOW, engine.check("delete_record", Map.of()));
-        assertEquals(PermissionDecision.ALLOW, engine.check("get_weather", Map.of()));
+        assertTrue(engine.check("write_file", Map.of()).isAllowed());
+        assertTrue(engine.check("delete_record", Map.of()).isAllowed());
+        assertTrue(engine.check("get_weather", Map.of()).isAllowed());
     }
 
     // ==================== 内置检查引擎测试 ====================
 
     @Test
-    @DisplayName("危险 bash 命令（rm -rf）→ DENY")
+    @DisplayName("危险 bash 命令（rm -rf）→ DENY（携带原因）")
     void dangerousCommandDeny() {
         PermissionDecision decision = engine.check("bash",
                 Map.of("command", "rm -rf /"));
-        assertEquals(PermissionDecision.DENY, decision);
+        assertTrue(decision.isDenied());
+        assertNotNull(decision.getReason());
+        assertTrue(decision.getReason().contains("rm -rf"));
     }
 
     @Test
-    @DisplayName("危险路径（/etc/）→ ASK")
+    @DisplayName("危险路径（/etc/）→ ASK（携带原因）")
     void dangerousPathAsk() {
         PermissionDecision decision = engine.check("edit_file",
                 Map.of("path", "/etc/passwd"));
-        assertEquals(PermissionDecision.ASK, decision);
+        assertTrue(decision.isAsk());
+        assertNotNull(decision.getReason());
+        assertTrue(decision.getReason().contains("/etc/"));
     }
 
     @Test
@@ -132,7 +143,7 @@ class PermissionTest {
     void safeArgumentsAllow() {
         PermissionDecision decision = engine.check("get_weather",
                 Map.of("city", "Beijing", "unit", "celsius"));
-        assertEquals(PermissionDecision.ALLOW, decision);
+        assertTrue(decision.isAllowed());
     }
 
     @Test
@@ -143,21 +154,59 @@ class PermissionTest {
         PermissionDecision decision = engine.check("bash",
                 Map.of("command", "rm -rf /"));
         // DONT_ASK 模式下，无规则命中，模式引擎不拦截 → ALLOW
-        assertEquals(PermissionDecision.ALLOW, decision);
+        assertTrue(decision.isAllowed());
     }
 
     @Test
     @DisplayName("空参数时内置检查返回 ALLOW")
     void builtInCheckEmptyArgsReturnsAllow() {
         PermissionDecision decision = engine.check("some_tool", Map.of());
-        assertEquals(PermissionDecision.ALLOW, decision);
+        assertTrue(decision.isAllowed());
     }
 
     @Test
     @DisplayName("null 参数时内置检查返回 ALLOW")
     void builtInCheckNullArgsReturnsAllow() {
         PermissionDecision decision = engine.check("some_tool", null);
-        assertEquals(PermissionDecision.ALLOW, decision);
+        assertTrue(decision.isAllowed());
+    }
+
+    // ==================== PermissionDecision 不可变类测试（T2 新增） ====================
+
+    @Test
+    @DisplayName("PermissionDecision.ALLOW 单例不带 reason")
+    void allowSingletonHasNoReason() {
+        assertTrue(PermissionDecision.ALLOW.isAllowed());
+        assertFalse(PermissionDecision.ALLOW.isDenied());
+        assertFalse(PermissionDecision.ALLOW.isAsk());
+        assertNull(PermissionDecision.ALLOW.getReason());
+    }
+
+    @Test
+    @DisplayName("PermissionDecision.deny(reason) 携带具体原因")
+    void denyFactoryCarriesReason() {
+        PermissionDecision d = PermissionDecision.deny("命中规则 X");
+        assertTrue(d.isDenied());
+        assertEquals("命中规则 X", d.getReason());
+    }
+
+    @Test
+    @DisplayName("PermissionDecision.ask(reason) 携带具体原因")
+    void askFactoryCarriesReason() {
+        PermissionDecision d = PermissionDecision.ask("需人工确认");
+        assertTrue(d.isAsk());
+        assertEquals("需人工确认", d.getReason());
+    }
+
+    @Test
+    @DisplayName("PermissionDecision equals/hashCode 基于类型与原因")
+    void permissionDecisionEquals() {
+        PermissionDecision d1 = PermissionDecision.deny("r1");
+        PermissionDecision d2 = PermissionDecision.deny("r1");
+        PermissionDecision d3 = PermissionDecision.deny("r2");
+        assertEquals(d1, d2);
+        assertNotEquals(d1, d3);
+        assertEquals(d1.hashCode(), d2.hashCode());
     }
 
     // ==================== PermissionMiddleware 集成测试 ====================
@@ -177,9 +226,10 @@ class PermissionTest {
     }
 
     @Test
-    @DisplayName("PermissionMiddleware 拒绝 DENY 决策的工具调用")
+    @DisplayName("PermissionMiddleware 拒绝 DENY 决策的工具调用（异常含具体原因）")
     void permissionMiddlewareDeniesDeniedTool() {
-        engine.addRule(new PermissionRule("delete_file", PermissionDecision.DENY, "forbidden"));
+        engine.addRule(new PermissionRule("delete_file",
+                PermissionDecision.deny("禁止删除文件"), "禁止删除文件"));
         PermissionMiddleware pm = new PermissionMiddleware(engine);
         MiddlewareChain chain = new MiddlewareChain();
         chain.add(pm);
@@ -187,13 +237,14 @@ class PermissionTest {
         AgentContext ctx = new AgentContext("agent-1", "sess-1", "user-1");
         ContentBlock.ToolCallBlock toolCall = new ContentBlock.ToolCallBlock("c1", "delete_file", "{}");
 
-        assertThrows(PermissionDeniedException.class, () -> chain.fireToolCall(ctx, toolCall));
+        PermissionDeniedException ex = assertThrows(PermissionDeniedException.class,
+                () -> chain.fireToolCall(ctx, toolCall));
+        assertTrue(ex.getReason().contains("禁止删除文件"));
     }
 
     @Test
-    @DisplayName("PermissionMiddleware ASK 决策抛出 PermissionDeniedException")
+    @DisplayName("PermissionMiddleware ASK 决策抛出 PermissionDeniedException（原因透传）")
     void permissionMiddlewareAskDecisionThrows() {
-        // 使用 EXPLORE 模式下不匹配的只读工具 + 危险路径触发 ASK
         engine.setMode(PermissionMode.DONT_ASK);
         engine.setBuiltInChecksEnabled(true);
 
@@ -205,7 +256,9 @@ class PermissionTest {
         // 触发危险路径内置检查 → ASK → 中间件自动拒绝
         ContentBlock.ToolCallBlock toolCall = new ContentBlock.ToolCallBlock("c1", "read_file", "{\"path\":\"/etc/passwd\"}");
 
-        assertThrows(PermissionDeniedException.class, () -> chain.fireToolCall(ctx, toolCall));
+        PermissionDeniedException ex = assertThrows(PermissionDeniedException.class,
+                () -> chain.fireToolCall(ctx, toolCall));
+        assertTrue(ex.getReason().contains("/etc/"));
     }
 
     // ==================== PermissionDeniedException 测试 ====================
@@ -224,11 +277,22 @@ class PermissionTest {
     @Test
     @DisplayName("PermissionRule 属性正确")
     void permissionRuleProperties() {
-        PermissionRule rule = new PermissionRule("tool_a", PermissionDecision.DENY, "test reason", true);
+        PermissionRule rule = new PermissionRule("tool_a",
+                PermissionDecision.deny("禁止"), "test reason", true);
         assertEquals("tool_a", rule.getToolName());
-        assertEquals(PermissionDecision.DENY, rule.getAction());
-        assertEquals("test reason", rule.getReason());
+        assertTrue(rule.getAction().isDenied());
+        // action 已携带 reason 时，rule 级 reason 被忽略（单一真相源）
+        assertEquals("禁止", rule.getAction().getReason());
         assertTrue(rule.isBypassImmune());
+    }
+
+    @Test
+    @DisplayName("PermissionRule 在 action 缺少 reason 时注入 rule 级 reason")
+    void permissionRuleInjectsReasonWhenActionLacksOne() {
+        // 裸 DENY（无 reason）+ rule 级 reason → 注入到 action
+        PermissionRule rule = new PermissionRule("tool_a",
+                PermissionDecision.deny(null), "注入原因", true);
+        assertEquals("注入原因", rule.getAction().getReason());
     }
 
     @Test
