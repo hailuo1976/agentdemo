@@ -84,5 +84,10 @@ public enum EventType {
     // ---- 预算控制 ----
 
     /** 回复预算超限 */
-    REPLY_BUDGET_EXCEEDED;
+    REPLY_BUDGET_EXCEEDED,
+
+    // ---- 输出截断 ----
+
+    /** 单次模型输出达到 max_tokens 上限被强制截断（tool_call 参数可能不完整） */
+    OUTPUT_TRUNCATED;
 }

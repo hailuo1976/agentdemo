@@ -400,6 +400,24 @@ public class Agent {
                             response.getToolCalls().size(), compactedCount);
                 }
 
+                // 输出截断告警：finish_reason=length 表示模型输出达到 max_tokens 上限，
+                // 上一条 assistant 的 tool_call 参数可能不完整（如 write_file 的 content 被截断）。
+                // 注入一条 user 角色告警，让模型在下一轮主动重发被截断的调用、避免基于残缺参数继续推进。
+                if (sink.isOutputTruncated()) {
+                    int mt = sink.getTruncatedMaxTokens();
+                    String warnText = String.format(
+                            "[系统提示] 上一轮输出达到 max_tokens%s 上限被强制截断。" +
+                            "刚才发出的 tool_call 参数可能不完整（例如 write_file 的 content 末段缺失、" +
+                            "JSON 提前闭合、字段被切半）。请检查上一次工具执行结果：若参数确实残缺，" +
+                            "重新发起该工具调用并确保参数完整；若结果可用，请继续推进任务。",
+                            mt > 0 ? "（" + mt + "）" : "");
+                    Msg truncWarn = new Msg(UUID.randomUUID().toString(), "user",
+                            List.of(new ContentBlock.TextBlock(warnText)));
+                    context.add(truncWarn);
+                    log.warn("[truncation] 迭代 {} 检测到 finish_reason=length，已注入截断告警；本次 toolCalls={}",
+                            iteration + 1, response.getToolCalls().size());
+                }
+
                 if (!response.hasToolCalls()) {
                     // 流式回复结束换行
                     progressTracker.onStreamEnd();
@@ -474,6 +492,10 @@ public class Agent {
         private final List<ContentBlock.ToolCallBlock> toolCalls = new ArrayList<>();
         private int promptTokens = 0;
         private int completionTokens = 0;
+        /** 本次模型调用是否因 finish_reason=length 被截断。*/
+        private boolean outputTruncated = false;
+        /** 截断时的 max_tokens 上限（用于告警文案）。*/
+        private int truncatedMaxTokens = 0;
 
         StreamSinkSink(EventStream outer, AgentProgressTracker tracker) {
             this.outer = outer;
@@ -519,8 +541,23 @@ public class Agent {
                     if (pt != null) promptTokens = pt;
                     if (ct != null) completionTokens = ct;
                 }
+                case OUTPUT_TRUNCATED -> {
+                    outputTruncated = true;
+                    Integer mt = e.getData("maxTokens", Integer.class);
+                    if (mt != null) truncatedMaxTokens = mt;
+                    outer.emit(e);
+                }
                 default -> outer.emit(e);
             }
+        }
+
+        /** 本次流是否被 max_tokens 截断。*/
+        boolean isOutputTruncated() {
+            return outputTruncated;
+        }
+
+        int getTruncatedMaxTokens() {
+            return truncatedMaxTokens;
         }
 
         Msg buildResponse() {

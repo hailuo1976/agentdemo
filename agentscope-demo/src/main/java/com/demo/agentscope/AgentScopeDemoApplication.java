@@ -229,6 +229,7 @@ public class AgentScopeDemoApplication {
 
             // 7. 创建聊天模型客户端
             ChatModel chatModel = new ChatModel(credentialProvider);
+            chatModel.setMaxOutputTokens(limits.getMaxOutputTokens());
 
             // 8. 创建智能体
             String systemPrompt = buildSystemPrompt(STOCK_TOOLS_ENABLED, limits);
@@ -711,6 +712,7 @@ public class AgentScopeDemoApplication {
                     ConsoleUI.printSeparator();
                     System.out.printf("  maxIterations = %d (迭代上限)%n", limits.getMaxIterations());
                     System.out.printf("  replyBudgetTokens = %d (单次回复 token 预算)%n", limits.getReplyBudgetTokens());
+                    System.out.printf("  maxOutputTokens = %d (单次 LLM 调用 max_tokens)%n", limits.getMaxOutputTokens());
                     System.out.printf("  iterationWarnRemaining = %d (剩余多少轮开始告警)%n", limits.getIterationWarnRemaining());
                     System.out.printf("  tokenBudgetWarnPercent = %d%% (token 预算告警阈值)%n", limits.getTokenBudgetWarnPercent());
                     System.out.printf("  maxContextTokens = %d (上下文窗口)%n", limits.getMaxContextTokens());
@@ -730,7 +732,7 @@ public class AgentScopeDemoApplication {
                     try {
                         limits.apply(parts[2]);
                         applyLimitsToRuntime(agent, contextManager, replyBudgetMiddleware,
-                                executionManager, workspaceDir, limits);
+                                executionManager, chatModel, workspaceDir, limits);
                         ConsoleUI.printSuccess("已更新: " + parts[2]);
                     } catch (Exception e) {
                         ConsoleUI.printError("设置失败: " + e.getMessage());
@@ -861,6 +863,7 @@ public class AgentScopeDemoApplication {
                                               ContextManager contextManager,
                                               ReplyBudgetControlMiddleware replyBudgetMiddleware,
                                               CodeExecutionManager executionManager,
+                                              ChatModel chatModel,
                                               Path workspaceDir,
                                               AgentLimits limits) {
         if (agent != null) {
@@ -881,6 +884,9 @@ public class AgentScopeDemoApplication {
         }
         if (executionManager != null) {
             executionManager.updateTimeoutSeconds(limits.getCommandTimeoutSeconds());
+        }
+        if (chatModel != null) {
+            chatModel.setMaxOutputTokens(limits.getMaxOutputTokens());
         }
         if (agent != null) {
             agent.setToolResultSummaryLimits(

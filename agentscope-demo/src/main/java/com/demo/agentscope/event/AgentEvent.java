@@ -404,6 +404,26 @@ public class AgentEvent {
         return create(EventType.REPLY_BUDGET_EXCEEDED, data, agentId);
     }
 
+    /**
+     * 创建输出截断事件。
+     * <p>
+     * 当 SSE 帧的 {@code finish_reason=length} 表示模型输出达到 {@code max_tokens} 上限被强制截断时发射。
+     * 这种场景下 tool_call 的 arguments 分片可能不完整，下游工具可能收到截断的参数。
+     * </p>
+     *
+     * @param agentId       智能体ID
+     * @param completionTokens 已生成的 token 数
+     * @param maxTokens     max_tokens 上限
+     * @return 输出截断事件
+     */
+    public static AgentEvent outputTruncated(String agentId, int completionTokens, int maxTokens) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("completionTokens", completionTokens);
+        data.put("maxTokens", maxTokens);
+        data.put("finishReason", "length");
+        return create(EventType.OUTPUT_TRUNCATED, data, agentId);
+    }
+
     @Override
     public String toString() {
         return "AgentEvent{id='" + id + "', type=" + type +

@@ -32,7 +32,8 @@ public class ChatModel {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json; charset=utf-8");
 
-    private static final int DEFAULT_MAX_TOKENS = 4096;
+    /** max_tokens 默认值（与 AgentLimits 默认一致）。运行期通过 {@link #setMaxOutputTokens} 覆盖。 */
+    private int maxOutputTokens = 8192;
     private static final double DEFAULT_TEMPERATURE = 0.7;
 
     /** OkHttp 客户端 */
@@ -48,6 +49,23 @@ public class ChatModel {
                 .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
                 .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .build();
+    }
+
+    /**
+     * 设置单次 LLM 调用的 max_tokens 上限。
+     * <p>
+     * 由 {@code AgentScopeDemoApplication} 装配时从 {@link com.demo.agentscope.config.AgentLimits#getMaxOutputTokens()}
+     * 传入；REPL {@code /config set maxOutputTokens=N} 后会再次调用以即时生效。
+     * </p>
+     */
+    public void setMaxOutputTokens(int maxOutputTokens) {
+        if (maxOutputTokens > 0) {
+            this.maxOutputTokens = maxOutputTokens;
+        }
+    }
+
+    public int getMaxOutputTokens() {
+        return maxOutputTokens;
     }
 
     /**
@@ -163,6 +181,8 @@ public class ChatModel {
         StringBuilder textBuffer = new StringBuilder();
         StringBuilder reasoningBuffer = new StringBuilder();
         int[] usage = {0, 0};
+        // finish_reason[length] 检测：流结束后通知调用方 tool_call 参数可能被截断
+        boolean[] lengthTruncated = {false};
 
         try (Response response = httpClient.newCall(request).execute()) {
             if (!response.isSuccessful()) {
@@ -184,7 +204,7 @@ public class ChatModel {
                     String payload = line.substring(5).trim();
                     if ("[DONE]".equals(payload)) break;
                     parseStreamFrame(payload, agentId, toolCallAccumulators,
-                            textBuffer, reasoningBuffer, usage, sink);
+                            textBuffer, reasoningBuffer, usage, lengthTruncated, sink);
                 }
             }
         } catch (IOException e) {
@@ -193,6 +213,13 @@ public class ChatModel {
         }
 
         // 流结束：聚合 tool_calls（arguments 分片已完整）+ 发射 MODEL_CALL_END
+        // 若 finish_reason=length，先发射 OUTPUT_TRUNCATED 让调用方知晓参数可能不完整
+        if (lengthTruncated[0]) {
+            log.warn("模型输出达到 max_tokens={} 上限被截断（finish_reason=length），" +
+                    "tool_call 参数可能不完整；下一轮将注入 user 消息告知模型",
+                    maxOutputTokens);
+            sink.onEvent(AgentEvent.outputTruncated(agentId, usage[1], maxOutputTokens));
+        }
         for (ToolCallAccumulator acc : toolCallAccumulators.values()) {
             Map<String, Object> args = new HashMap<>();
             args.put("id", acc.id);
@@ -206,16 +233,18 @@ public class ChatModel {
 
     /**
      * 解析 SSE 单帧 data 负载，delta 事件实时上推到 sink。
+     * {@code finish_reason=length} 写入 lengthTruncated[0]，由 chatStream 在流结束后统一发射事件。
      */
     private void parseStreamFrame(String payload, String agentId,
                                    Map<Integer, ToolCallAccumulator> toolCallAccumulators,
                                    StringBuilder textBuffer, StringBuilder reasoningBuffer,
-                                   int[] usage, StreamSink sink) {
+                                   int[] usage, boolean[] lengthTruncated, StreamSink sink) {
         try {
             JsonNode root = OBJECT_MAPPER.readTree(payload);
             JsonNode choices = root.path("choices");
             if (choices.isArray() && !choices.isEmpty()) {
-                JsonNode delta = choices.get(0).path("delta");
+                JsonNode choice0 = choices.get(0);
+                JsonNode delta = choice0.path("delta");
 
                 // 文本 delta —— 实时上推
                 String content = delta.path("content").asText("");
@@ -253,6 +282,12 @@ public class ChatModel {
                         }
                     }
                 }
+
+                // finish_reason：流末帧才携带。length 表示因 max_tokens 截断
+                String finishReason = choice0.path("finish_reason").asText(null);
+                if ("length".equals(finishReason)) {
+                    lengthTruncated[0] = true;
+                }
             }
 
             // 最后一帧的 usage（stream_options.include_usage=true 时）
@@ -282,7 +317,7 @@ public class ChatModel {
                                          List<MCPClient.ToolInfo> tools) {
         ObjectNode body = OBJECT_MAPPER.createObjectNode();
         body.put("model", modelName);
-        body.put("max_tokens", DEFAULT_MAX_TOKENS);
+        body.put("max_tokens", maxOutputTokens);
         body.put("temperature", DEFAULT_TEMPERATURE);
 
         // 构建消息数组

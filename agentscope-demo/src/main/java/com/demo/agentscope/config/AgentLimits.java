@@ -26,6 +26,9 @@ public class AgentLimits {
     /** 单次回复的 token 预算上限。 */
     private int replyBudgetTokens = 500_000;
 
+    /** 单次 LLM 调用的输出 token 上限（max_tokens 参数）。 */
+    private int maxOutputTokens = 8192;
+
     /** 迭代预算告警阈值：剩余轮数 ≤ 此值时注入 user 角色预算告警。 */
     private int iterationWarnRemaining = 10;
 
@@ -81,6 +84,7 @@ public class AgentLimits {
     public AgentLimits loadFromEnv() {
         maxIterations = readInt("MAX_ITERATIONS", maxIterations);
         replyBudgetTokens = readInt("REPLY_BUDGET", replyBudgetTokens);
+        maxOutputTokens = readInt("MAX_OUTPUT_TOKENS", maxOutputTokens);
         iterationWarnRemaining = readInt("ITERATION_WARN_REMAINING", iterationWarnRemaining);
         tokenBudgetWarnPercent = readInt("TOKEN_BUDGET_WARN_PERCENT", tokenBudgetWarnPercent);
         maxContextTokens = readInt("MAX_CONTEXT_TOKENS", maxContextTokens);
@@ -113,6 +117,7 @@ public class AgentLimits {
         switch (key) {
             case "maxIterations" -> maxIterations = requirePositiveInt(key, value);
             case "replyBudgetTokens" -> replyBudgetTokens = requirePositiveInt(key, value);
+            case "maxOutputTokens" -> maxOutputTokens = requirePositiveInt(key, value);
             case "iterationWarnRemaining" -> iterationWarnRemaining = requireNonNegativeInt(key, value);
             case "tokenBudgetWarnPercent" -> {
                 int pct = requireNonNegativeInt(key, value);
@@ -143,6 +148,9 @@ public class AgentLimits {
 
     public int getReplyBudgetTokens() { return replyBudgetTokens; }
     public void setReplyBudgetTokens(int replyBudgetTokens) { this.replyBudgetTokens = replyBudgetTokens; }
+
+    public int getMaxOutputTokens() { return maxOutputTokens; }
+    public void setMaxOutputTokens(int maxOutputTokens) { this.maxOutputTokens = maxOutputTokens; }
 
     public int getIterationWarnRemaining() { return iterationWarnRemaining; }
     public void setIterationWarnRemaining(int iterationWarnRemaining) { this.iterationWarnRemaining = iterationWarnRemaining; }
@@ -186,13 +194,14 @@ public class AgentLimits {
     @Override
     public String toString() {
         return String.format(Locale.ROOT,
-                "AgentLimits{maxIterations=%d, replyBudgetTokens=%d, iterationWarnRemaining=%d, "
+                "AgentLimits{maxIterations=%d, replyBudgetTokens=%d, maxOutputTokens=%d, "
+                        + "iterationWarnRemaining=%d, "
                         + "tokenBudgetWarnPercent=%d%%, maxContextTokens=%d, maxRecentMessages=%d, "
                         + "shortTermMemoryLimit=%d, longTermMemoryLimit=%d, "
                         + "microCompactorKeepRecent=%d, microCompactorTriggerToolCount=%d, "
                         + "toolResultSummaryThreshold=%d, toolResultSummaryMaxLength=%d, "
                         + "commandTimeoutSeconds=%d, workspaceTimeoutSeconds=%d, maxFileSizeBytes=%d}",
-                maxIterations, replyBudgetTokens, iterationWarnRemaining, tokenBudgetWarnPercent,
+                maxIterations, replyBudgetTokens, maxOutputTokens, iterationWarnRemaining, tokenBudgetWarnPercent,
                 maxContextTokens, maxRecentMessages, shortTermMemoryLimit, longTermMemoryLimit,
                 microCompactorKeepRecent, microCompactorTriggerToolCount,
                 toolResultSummaryThreshold, toolResultSummaryMaxLength,
