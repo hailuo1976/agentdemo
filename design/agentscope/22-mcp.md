@@ -55,6 +55,29 @@
 
 通过 `registerCustomTool(name, description, parametersJson, executor)` 公开接口注入。
 
+### 2.4 上下文归档工具（1 个）
+由 `AgentScopeDemoApplication` 在 `registerCacheTools` 之后注入，配合 `ContextToolResultArchiver` 机制（详见 [32-context.md](32-context.md)）：
+
+| 工具 | 行为 |
+|---|---|
+| `get_full_tool_output` | 按 `tool_call_id` 从 `ToolOutputArchive` 取回原始全量；未命中返回可用 ID 列表 |
+
+注册形式：
+```java
+mcpClient.registerCustomTool(
+    "get_full_tool_output",
+    "提取某个工具结果的完整原始内容（上下文中只保留了摘要时使用）",
+    "{\"properties\":{\"tool_call_id\":{\"type\":\"string\"}}," +
+    "\"required\":[\"tool_call_id\"]}",
+    args -> {
+        String id = (String) args.get("tool_call_id");
+        String full = archive.getFullOutput(id);
+        return full != null ? full
+            : "[未找到 tool_call_id=" + id + " 对应的归档输出。可用的 ID："
+              + archive.listAll().keySet() + "]";
+    });
+```
+
 ---
 
 ## 3. 外部 MCP 集成
@@ -120,18 +143,21 @@ interface BuiltinToolExecutor {
 ## 5. 关键方法
 
 ### 5.1 `registerCustomTool(name, description, parametersJson, executor)`
-公开注册接口，团队工具通过此注入。
+公开注册接口，团队工具与 `get_full_tool_output` 均通过此注入。
 
 ### 5.2 `registerFileTools(SecureFileWorkspace)` / `registerCodeExecutionTools(CodeExecutionManager)`
 成组注册文件 / 代码工具。
 
-### 5.3 `executeTool(name, args)`
+### 5.3 `getToolResultSummarizer()`
+返回内部的 `ToolResultSummarizer` 实例，供 `ContextToolResultArchiver` 装配时复用其差异化摘要策略（详见 [32-context.md](32-context.md)）。
+
+### 5.4 `executeTool(name, args)`
 执行顺序：
 1. 查 `builtinTools` map → 找到即执行
 2. 否则查 `allToolInfos` 找到所属 server → 通过 `McpServerConnection.callTool`
 3. 都找不到 → `ToolResult(false, "未找到工具")`
 
-### 5.4 `copyToolsTo(target, excludeTools)` —— **工作者隔离的关键**
+### 5.5 `copyToolsTo(target, excludeTools)` —— **工作者隔离的关键**
 - 用于 `AgentTeam.createWorker()`
 - 把 Leader 的工具复制到 worker 的独立 MCPClient
 - 排除 5 个团队工具，避免越权
@@ -150,11 +176,12 @@ interface BuiltinToolExecutor {
 
 | 维度 | pimono | agentscope |
 |---|---|---|
-| builtin 工具 | 5 个 mock | 12 个生产工具（4+3+5） |
+| builtin 工具 | 5 个 mock | 13 个生产工具（4+3+5+1） |
 | 注册接口 | 私有硬编码 | 公开 `registerCustomTool` |
 | 文件工具 | 无 | 4 个 + 权限管控 |
 | 代码执行 | 无 | 3 个 + 安全检查 + 超时 |
 | 团队工具 | 无 | 5 个 |
+| 上下文归档 | 无 | 1 个（`get_full_tool_output`） |
 | 工具集隔离 | 无 | `copyToolsTo` 支持工作者隔离 |
 | ToolInfo | 内嵌 | record（含 parametersJson） |
 

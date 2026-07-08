@@ -24,6 +24,7 @@
 | `context: List<Msg>` | 对话历史 |
 | `agentState: Map` | 状态 |
 | `maxIterations = 50` | 循环兜底 |
+| `toolResultArchiver: ContextToolResultArchiver` | 工具结果归档器（可空，未注入时退化为原行为） |
 | `progressTracker` | 进度跟踪器（每次 reply 重建以反映 verbosity） |
 
 ### 1.3 reply 主循环
@@ -38,9 +39,15 @@ onReplyStart
     if !response.hasToolCalls(): break       ← 最终答案
     for toolCall in response.toolCalls:
       onToolCall → permissionEngine.check → mcpClient.executeTool → onToolResult
-      context.add(toolResultMsg)
+      // 工具结果入 context 三步（详见 32-context.md）
+      ① toolResultArchiver.compactExistingToolResults(context)   // 旧 FULL → SUMMARIZED
+      ② toolResultArchiver.archive().archive(toolCallId, ...)    // 原始落盘
+      ③ context.add(toolResultMsg)
+      ④ toolResultArchiver.markAsFull(toolResultMsg, toolCallId) // 新块标 FULL
   onReplyEnd (含上下文压缩)
 ```
+
+**工具结果归档注入点**：`reply()` 与 `replyStream()` 共用一段私有方法 `appendToolResultToContext(...)`，集中三步操作。`toolResultArchiver` 可空——未注入时退化为原始行为（直接 add），保证向后兼容。
 
 ### 1.4 truncateToolResult
 
@@ -54,11 +61,22 @@ onReplyStart
 
 防止团队模式下工作者回复撑爆 Leader 上下文。
 
+> 注意：截断发生在**入 context 之前**——先截断，再归档原始（已截断）内容。`ContextToolResultArchiver` 看到的是截断后的结果。
+
 ### 1.5 appendToSystemPrompt
 
 允许在 Agent 构造后追加系统提示词内容。用于：
 - `AgentTeam.registerTeamTools()` 注入团队工具描述
 - 让 LLM 感知自身具备团队管理能力
+- 工具结果处理规则声明（由 `AgentScopeDemoApplication` 装配阶段追加，详见 [32-context.md](32-context.md) § 11）
+
+### 1.6 setToolResultArchiver
+
+```java
+public void setToolResultArchiver(ContextToolResultArchiver a)
+```
+
+装配阶段由 `AgentScopeDemoApplication` 调用，启用时序归档机制（见 [32-context.md](32-context.md)）。未调用时字段为 null，reply/replyStream 走原始路径，无副作用。
 
 ---
 

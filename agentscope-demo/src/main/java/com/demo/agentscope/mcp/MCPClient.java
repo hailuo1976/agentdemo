@@ -62,6 +62,13 @@ public class MCPClient {
                 resultSummarizer.getSummaryThreshold(), resultSummarizer.getMaxSummaryLength());
     }
 
+    /**
+     * 暴露内部的 ToolResultSummarizer 实例，供 ContextToolResultArchiver 等组件复用相同摘要策略。
+     */
+    public ToolResultSummarizer getToolResultSummarizer() {
+        return resultSummarizer;
+    }
+
     // ==================== 初始化 ====================
 
     /**

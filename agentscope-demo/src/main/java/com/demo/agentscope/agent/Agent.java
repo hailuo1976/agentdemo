@@ -85,6 +85,9 @@ public class Agent {
     /** Token 预算中间件引用（可选；由 main 装配用于运行期注入告警与查询用量） */
     private com.demo.agentscope.middleware.ReplyBudgetControlMiddleware replyBudgetMiddleware;
 
+    /** 上下文工具结果归档器（可选；注入后开启「最新全量 + 历史摘要」机制） */
+    private com.demo.agentscope.context.ContextToolResultArchiver toolResultArchiver;
+
     /** 智能体状态（等价于 AgentState） */
     private final Map<String, Object> agentState;
 
@@ -258,11 +261,23 @@ public class Agent {
                     // 工具结果(MCPClient 内 ToolResultSummarizer 已统一对超长输出做摘要)
                     String resultContent = toolResult.isSuccess() ? toolResult.getOutput() : toolResult.getError();
 
+                    // 归档 + 摘要旧结果：成功结果走归档器，失败结果保持原行为
+                    if (toolResultArchiver != null && toolResult.isSuccess()) {
+                        toolResultArchiver.compactExistingToolResults(context);
+                        toolResultArchiver.archive().archive(
+                                toolCall.getId(), toolCall.getName(), toolArgs, resultContent);
+                    }
+
                     // 构建工具结果消息
                     ContentBlock.ToolResultBlock resultBlock = new ContentBlock.ToolResultBlock(
                             toolCall.getId(), resultContent, !toolResult.isSuccess());
                     Msg toolResultMsg = buildToolResultMsg(resultBlock);
                     context.add(toolResultMsg);
+
+                    // 标记新加入块为 FULL（下一轮新结果进来时再降级为 SUMMARIZED）
+                    if (toolResultArchiver != null && toolResult.isSuccess()) {
+                        toolResultArchiver.markAsFull(toolResultMsg, toolCall.getId());
+                    }
 
                     // 触发 onToolResult
                     middlewareChain.fireToolResult(ctx, resultBlock);
@@ -445,10 +460,22 @@ public class Agent {
                     progressTracker.onToolCallComplete(toolCall.getName(), toolResult.isSuccess(), toolDuration);
 
                     String resultContent = toolResult.isSuccess() ? toolResult.getOutput() : toolResult.getError();
+
+                    // 归档 + 摘要旧结果（与 reply() 保持一致）
+                    if (toolResultArchiver != null && toolResult.isSuccess()) {
+                        toolResultArchiver.compactExistingToolResults(context);
+                        toolResultArchiver.archive().archive(
+                                toolCall.getId(), toolCall.getName(), toolArgs, resultContent);
+                    }
+
                     ContentBlock.ToolResultBlock resultBlock = new ContentBlock.ToolResultBlock(
                             toolCall.getId(), resultContent, !toolResult.isSuccess());
                     Msg toolResultMsg = buildToolResultMsg(resultBlock);
                     context.add(toolResultMsg);
+
+                    if (toolResultArchiver != null && toolResult.isSuccess()) {
+                        toolResultArchiver.markAsFull(toolResultMsg, toolCall.getId());
+                    }
 
                     middlewareChain.fireToolResult(ctx, resultBlock);
                     eventStream.emit(AgentEvent.toolResult(id, toolCall.getName(), resultContent));
@@ -931,5 +958,16 @@ public class Agent {
             return;
         }
         mcpClient.updateToolResultSummarizerLimits(threshold, maxLength);
+    }
+
+    /**
+     * 注入上下文工具结果归档器（由 AgentScopeDemoApplication 装配）。
+     * <p>
+     * 注入后开启「最新一条工具结果全量、历史全部摘要」机制；null 时退化为原有行为。
+     * </p>
+     */
+    public void setToolResultArchiver(
+            com.demo.agentscope.context.ContextToolResultArchiver archiver) {
+        this.toolResultArchiver = archiver;
     }
 }

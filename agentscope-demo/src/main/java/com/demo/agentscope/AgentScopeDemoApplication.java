@@ -118,6 +118,13 @@ public class AgentScopeDemoApplication {
                 6. 代码执行受安全策略限制（禁止危险命令、超时见下方约束）。
                 """);
         sb.append(buildRuntimeConstraints(limits));
+        sb.append("""
+
+                ## 工具结果处理规则
+                - 上下文中除最新一条外，所有工具结果都会被自动摘要（块前缀含「此工具结果已摘要」与 tool_call_id）。
+                - 原始完整内容已归档，需要查看时调用 `get_full_tool_output` 工具，参数为 `tool_call_id`。
+                - 仅在确实需要完整细节（精确定位行号、核查数据、二次分析）时才取回全量，避免不必要的上下文膨胀。
+                """);
         if (stockEnabled) {
             sb.append(STOCK_PROMPT_ADDENDUM);
         }
@@ -195,6 +202,33 @@ public class AgentScopeDemoApplication {
                     Duration.ofHours(24));
             mcpClient.registerCacheTools(cacheManager);
 
+            // 4.3.1 工具输出归档器 + get_full_tool_output 内置工具
+            com.demo.agentscope.tool.ToolOutputArchive toolOutputArchive =
+                    new com.demo.agentscope.tool.ToolOutputArchive(
+                            workspaceDir.resolve("cache/tool_outputs"));
+            String getFullToolOutputSchema =
+                    "{\"type\":\"object\",\"properties\":{\"tool_call_id\":{\"type\":\"string\",\"description\":\"要提取完整输出的工具调用 ID\"}},\"required\":[\"tool_call_id\"]}";
+            mcpClient.registerCustomTool(
+                    "get_full_tool_output",
+                    "提取某个工具结果的完整原始内容（上下文中只保留了摘要时使用）",
+                    getFullToolOutputSchema,
+                    toolArgs -> {
+                        Object raw = toolArgs.get("tool_call_id");
+                        String toolCallId = raw != null ? String.valueOf(raw) : "";
+                        if (toolCallId.isBlank()) {
+                            return "错误：tool_call_id 不能为空";
+                        }
+                        String full = toolOutputArchive.getFullOutput(toolCallId);
+                        if (full != null) {
+                            return full;
+                        }
+                        java.util.Map<String, ?> available = toolOutputArchive.listAll();
+                        return available.isEmpty()
+                                ? "[当前没有已归档的工具输出]"
+                                : "[未找到 tool_call_id=" + toolCallId + " 对应的归档输出。可用的 ID："
+                                        + available.keySet() + "]";
+                    });
+
             // 4.4 股票分析工具（受 STOCK_TOOLS_ENABLED 开关控制，默认关闭）
             TuShareDataSource tuShareSource = STOCK_TOOLS_ENABLED ? new TuShareDataSource(executionManager) : null;
             if (STOCK_TOOLS_ENABLED) {
@@ -252,6 +286,12 @@ public class AgentScopeDemoApplication {
             // 同步迭代上限到 Agent（Agent 内部仍保留独立字段，便于 REPL /config 即时生效）
             agent.setMaxIterations(limits.getMaxIterations());
             agent.setLimits(limits);
+
+            // 8.0 装配「最新全量 + 历史摘要」工具结果归档机制
+            com.demo.agentscope.context.ContextToolResultArchiver toolResultArchiver =
+                    new com.demo.agentscope.context.ContextToolResultArchiver(
+                            toolOutputArchive, mcpClient.getToolResultSummarizer());
+            agent.setToolResultArchiver(toolResultArchiver);
 
             // 8.1 创建短期记忆管理器
             ShortTermMemory shortTermMemory = new ShortTermMemory(
