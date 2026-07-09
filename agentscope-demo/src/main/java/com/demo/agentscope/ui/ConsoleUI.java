@@ -93,7 +93,12 @@ public class ConsoleUI {
      * @return 用户输入的文本，若输入流结束则返回 null
      */
     public static String promptUser() {
-        return STDIN_READER.readLine(BLUE + "You ▶ " + RESET);
+        try {
+            return STDIN_READER.readLine(BLUE + "You ▶ " + RESET);
+        } catch (org.jline.reader.UserInterruptException e) {
+            // Ctrl+C：视为退出信号，走 REPL 的正常关闭路径
+            return null;
+        }
     }
 
     // ==================== 智能体响应 ====================
