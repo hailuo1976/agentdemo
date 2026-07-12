@@ -170,6 +170,16 @@ public class AgentScopeDemoApplication {
         // 1. 打印横幅
         ConsoleUI.printBanner();
 
+        // 预触发 logback 关键类加载 —— shade 后偶发 NoClassDefFoundError：
+        // LoggingEvent 构造时才首次解析 ThrowableProxy，若此时 ClassLoader
+        // 出问题会让 REPL 主循环的 catch(Throwable) 块在打错误日志时再炸一次。
+        // 这里主动触碰，把潜在链接期错误前移到启动期。
+        try {
+            Class.forName("ch.qos.logback.classic.spi.ThrowableProxy");
+            Class.forName("ch.qos.logback.classic.spi.LoggingEvent");
+        } catch (ClassNotFoundException ignored) {
+        }
+
         try {
             // 1.1 加载运行时限制（代码默认值 → 环境变量覆盖；REPL /config 之后还能再覆盖）
             AgentLimits limits = new AgentLimits().loadFromEnv();
@@ -364,7 +374,13 @@ public class AgentScopeDemoApplication {
                     contextManager, replyBudgetMiddleware, sessionLoggingMiddleware);
 
         } catch (Exception e) {
-            log.error("应用启动失败", e);
+            try {
+                log.error("应用启动失败", e);
+            } catch (NoClassDefFoundError logErr) {
+                System.err.println("[FALLBACK] 应用启动失败: " + e);
+                e.printStackTrace(System.err);
+                System.err.println("[FALLBACK] logback 异常: " + logErr);
+            }
             ConsoleUI.printError("应用启动失败: " + e.getMessage());
             System.exit(1);
         }
@@ -987,7 +1003,18 @@ public class AgentScopeDemoApplication {
                 // Throwable 而非 Exception：捕获 NoClassDefFoundError 等链接期错误，
                 // 避免 REPL 主循环被任何意外错误击穿。agent/LLM/工具链任何一环
                 // 抛错都仅终止本轮 reply，下一轮用户输入仍可继续。
-                log.error("处理用户输入异常: {}", trimmed, e);
+                try {
+                    log.error("处理用户输入异常: {}", trimmed, e);
+                } catch (NoClassDefFoundError logErr) {
+                    // logback 在 shade 后偶发 ThrowableProxy 链接失败 —— 此时
+                    // log.error(msg, throwable) 自身会抛 NoClassDefFoundError。
+                    // 退化到 System.err 直接打印，确保异常信息不丢，REPL 不崩。
+                    System.err.println("[FALLBACK] 处理用户输入异常: " + trimmed);
+                    e.printStackTrace(System.err);
+                    if (!"ch/qos/logback/classic/spi/ThrowableProxy".equals(logErr.getMessage())) {
+                        System.err.println("[FALLBACK] logback 异常: " + logErr);
+                    }
+                }
                 ConsoleUI.printError("处理失败: " + e.getClass().getSimpleName()
                         + (e.getMessage() != null ? ": " + e.getMessage() : ""));
                 ConsoleUI.printInfo("输入 help 查看可用命令，或继续输入下一轮对话");
