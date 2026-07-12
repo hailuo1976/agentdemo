@@ -6,12 +6,18 @@ import com.demo.agentscope.event.EventType;
 import com.demo.agentscope.message.ContentBlock;
 import com.demo.agentscope.message.Msg;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
+import org.jline.reader.UserInterruptException;
+import org.jline.reader.EndOfFileException;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 
@@ -34,16 +40,40 @@ public class ConsoleUI {
      * 相比 BufferedReader，JLine3 自己负责行编辑和回显，
      * 不依赖终端的 cooked mode，从而彻底解决中英文退格不一致的问题。
      * </p>
+     * <p>
+     * 容错策略：类初始化失败（JLine 版本不匹配、终端 JNI 加载失败等）
+     * 不会导致整个应用启动失败，而是退回到 BufferedReader。退格键回显在
+     * 非 raw mode 终端上依赖系统 cooked mode，但应用核心功能（对话）不受影响。
+     * </p>
      */
     private static final LineReader STDIN_READER;
+    private static final BufferedReader FALLBACK_READER;
+    private static final boolean JLINE_AVAILABLE;
 
     static {
+        LineReader reader = null;
+        boolean jlineOk = false;
         try {
             Terminal terminal = TerminalBuilder.builder().system(true).build();
-            STDIN_READER = LineReaderBuilder.builder().terminal(terminal).build();
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to initialize JLine3 terminal", e);
+            reader = LineReaderBuilder.builder().terminal(terminal).build();
+            // 预触发 BellType 类加载 —— JLine 3.25.1 的 beep() 方法在运行期
+            // 第一次触发时才加载 BellType enum，shade 后偶发 NoClassDefFoundError。
+            // 这里主动触碰一次，让 ClassLoader 在应用启动早期就解析依赖。
+            // 注意：这里不调用 beep()，避免出现意外响声。
+            try {
+                Class.forName("org.jline.reader.impl.LineReaderImpl$BellType");
+            } catch (ClassNotFoundException ignored) {
+                // BellType 缺失：JLine 部分功能受损但 readLine 通常仍可用
+            }
+            jlineOk = true;
+        } catch (Throwable e) {
+            // Throwable 而非 Exception —— JLine 的 link 错误会抛 UnsatisfiedLinkError
+            System.err.println("[ConsoleUI] JLine3 初始化失败，回退到 BufferedReader: " + e.getMessage());
         }
+        STDIN_READER = reader;
+        FALLBACK_READER = new BufferedReader(
+                new InputStreamReader(System.in, StandardCharsets.UTF_8));
+        JLINE_AVAILABLE = jlineOk;
     }
 
     // ==================== ANSI 颜色常量 ====================
@@ -89,14 +119,42 @@ public class ConsoleUI {
      * 通过 JLine3 LineReader 接管终端输入，按字符（码点）处理退格，
      * 彻底解决中文退格时屏幕回显与实际缓冲不一致的问题。
      * </p>
+     * <p>
+     * 异常容错：JLine 的 readLine 在运行时可能因为终端状态错乱、信号、
+     * 或 BellType 等内部类延迟加载失败抛出 NoClassDefFoundError /
+     * IllegalStateException。此处捕获后回退到 BufferedReader，
+     * 保证 REPL 主循环不会因为输入层异常整体崩溃。
+     * </p>
      *
      * @return 用户输入的文本，若输入流结束则返回 null
      */
     public static String promptUser() {
+        // 优先用 JLine
+        if (JLINE_AVAILABLE && STDIN_READER != null) {
+            try {
+                return STDIN_READER.readLine(BLUE + "You ▶ " + RESET);
+            } catch (UserInterruptException e) {
+                // Ctrl+C：视为退出信号，走 REPL 的正常关闭路径
+                return null;
+            } catch (EndOfFileException e) {
+                // Ctrl+D：输入流结束
+                return null;
+            } catch (Throwable e) {
+                // JLine 运行期异常（如 BellType NoClassDefFoundError、
+                // terminal disposed、信号打断等）：不向上抛，本次回退到
+                // BufferedReader，下次循环再尝试 JLine。
+                System.err.println("[ConsoleUI] JLine readLine 异常，本次回退到 BufferedReader: "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+        }
+        // 回退路径：BufferedReader
+        System.out.print(BLUE + "You ▶ " + RESET);
+        System.out.flush();
         try {
-            return STDIN_READER.readLine(BLUE + "You ▶ " + RESET);
-        } catch (org.jline.reader.UserInterruptException e) {
-            // Ctrl+C：视为退出信号，走 REPL 的正常关闭路径
+            String line = FALLBACK_READER.readLine();
+            return line; // readLine() 在 EOF 时返回 null，自然映射
+        } catch (IOException e) {
+            System.err.println("[ConsoleUI] BufferedReader 读取失败: " + e.getMessage());
             return null;
         }
     }

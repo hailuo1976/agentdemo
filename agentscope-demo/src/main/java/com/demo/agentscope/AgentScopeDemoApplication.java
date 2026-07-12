@@ -594,9 +594,18 @@ public class AgentScopeDemoApplication {
         boolean showEvents = false;
 
         while (true) {
-            String input = ConsoleUI.promptUser();
+            String input;
+            try {
+                input = ConsoleUI.promptUser();
+            } catch (Throwable t) {
+                // promptUser 内部已有容错，但兜底：任何漏网的异常都不应击穿 REPL
+                log.error("读取用户输入时发生未预期异常", t);
+                ConsoleUI.printError("输入读取异常: " + t.getClass().getSimpleName()
+                        + " — 请重新输入");
+                continue;
+            }
             if (input == null) {
-                // 输入流结束
+                // 输入流结束（EOF / Ctrl+D / Ctrl+C）
                 break;
             }
 
@@ -974,10 +983,14 @@ public class AgentScopeDemoApplication {
                     ConsoleUI.printInfo("响应耗时: " + duration + "ms");
                 }
 
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                // Throwable 而非 Exception：捕获 NoClassDefFoundError 等链接期错误，
+                // 避免 REPL 主循环被任何意外错误击穿。agent/LLM/工具链任何一环
+                // 抛错都仅终止本轮 reply，下一轮用户输入仍可继续。
                 log.error("处理用户输入异常: {}", trimmed, e);
-                ConsoleUI.printError("处理失败: " + e.getMessage());
-                ConsoleUI.printInfo("输入 help 查看可用命令");
+                ConsoleUI.printError("处理失败: " + e.getClass().getSimpleName()
+                        + (e.getMessage() != null ? ": " + e.getMessage() : ""));
+                ConsoleUI.printInfo("输入 help 查看可用命令，或继续输入下一轮对话");
             }
         }
     }
