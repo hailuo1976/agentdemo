@@ -307,6 +307,7 @@ public class Agent {
 
         // 将上下文传递给中间件，供 ContextCompressionMiddleware 使用
         ctx.setAttribute("contextMessages", context);
+        ctx.setAttribute("agentState", agentState);
 
         // 触发 onReplyEnd
         middlewareChain.fireReplyEnd(ctx, eventStream);
@@ -367,6 +368,7 @@ public class Agent {
         // 创建上下文和事件流
         AgentContext ctx = new AgentContext(id, UUID.randomUUID().toString(), "default");
         ctx.setReplyStartTime(replyStartTime);
+        ctx.setAttribute("userInput", userInput);
         EventStream eventStream = new EventStream(id);
 
         // 触发 onReplyStart
@@ -489,6 +491,7 @@ public class Agent {
 
         // 将上下文传递给中间件
         ctx.setAttribute("contextMessages", context);
+        ctx.setAttribute("agentState", agentState);
 
         middlewareChain.fireReplyEnd(ctx, eventStream);
         eventStream.emit(AgentEvent.replyEnd(id));
@@ -787,6 +790,25 @@ public class Agent {
         context.clear();
         agentState.clear();
         log.info("智能体 [{}] 已重置", name);
+    }
+
+    /**
+     * 从会话日志重建的 messages 列表恢复上下文（{@code /resume} 场景）。
+     * <p>
+     * 内部先清空再注入，确保恢复后的状态干净。注意：此方法不恢复
+     * ContextManager 的压缩摘要、toolResultArchiver 的归档状态等衍生状态 ——
+     * 这些状态会在新会话继续时自然重新累积。
+     * </p>
+     *
+     * @param restoredMessages 从 JSONL 重建的消息列表（不含 system 消息）
+     */
+    public void restoreContext(List<Msg> restoredMessages) {
+        context.clear();
+        if (restoredMessages != null) {
+            context.addAll(restoredMessages);
+        }
+        log.info("智能体 [{}] 上下文已恢复，消息数: {}",
+                name, restoredMessages != null ? restoredMessages.size() : 0);
     }
 
     /**

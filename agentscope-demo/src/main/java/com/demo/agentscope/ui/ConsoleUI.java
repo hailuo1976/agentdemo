@@ -406,6 +406,8 @@ public class ConsoleUI {
         System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
         System.out.println("  " + CYAN + "exit/quit" + RESET + "   - 退出应用");
         System.out.println("  " + CYAN + "history" + RESET + "    - 查看对话历史");
+        System.out.println("  " + CYAN + "/sessions" + RESET + "  - 列出已保存的会话");
+        System.out.println("  " + CYAN + "/resume <id>" + RESET + " - 恢复指定会话（支持短ID前缀）");
         System.out.println("  " + CYAN + "status" + RESET + "     - 查看智能体状态");
         System.out.println("  " + CYAN + "clear" + RESET + "      - 重置智能体（清空上下文）");
         System.out.println("  " + CYAN + "team create" + RESET + " - 创建智能体团队（含领导者）");

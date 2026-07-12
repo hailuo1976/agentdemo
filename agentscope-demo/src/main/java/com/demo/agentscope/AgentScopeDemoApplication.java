@@ -28,6 +28,11 @@ import com.demo.agentscope.permission.PermissionEngine;
 import com.demo.agentscope.permission.PermissionMiddleware;
 import com.demo.agentscope.permission.PermissionMode;
 import com.demo.agentscope.permission.PermissionRule;
+import com.demo.agentscope.session.SessionLogger;
+import com.demo.agentscope.session.SessionLoggingMiddleware;
+import com.demo.agentscope.session.SessionRecovery;
+import com.demo.agentscope.session.SessionRecovery.RecoveredSession;
+import com.demo.agentscope.session.SessionRecovery.SessionSummary;
 import com.demo.agentscope.ui.ConsoleUI;
 import com.demo.agentscope.ui.VerbosityLevel;
 import com.demo.agentscope.stock.StockToolService;
@@ -336,6 +341,12 @@ public class AgentScopeDemoApplication {
                     limits.getToolResultSummaryThreshold(),
                     limits.getToolResultSummaryMaxLength());
 
+            // 会话日志：每个进程启动生成一个新 sessionId，所有交互写入 JSONL
+            String sessionId = UUID.randomUUID().toString();
+            SessionLogger sessionLogger = new SessionLogger(workspaceDir, sessionId);
+            SessionLoggingMiddleware sessionLoggingMiddleware = new SessionLoggingMiddleware(sessionLogger);
+            chain.add(sessionLoggingMiddleware);
+
             // 打印启动信息
             printStartupInfo(primaryProvider, modelName, mcpClient, permissionEngine, STOCK_TOOLS_ENABLED);
 
@@ -343,13 +354,14 @@ public class AgentScopeDemoApplication {
             VerbosityLevel verbosity = VerbosityLevel.fromEnv();
             ConsoleUI.printInfo("界面详细程度: " + verbosity.getDisplayName() + " - " + verbosity.getDescription());
             ConsoleUI.printInfo("可通过 verbosity 命令调整详细程度，或设置环境变量 VERBOSITY=MINIMAL|STANDARD|VERBOSE|DEBUG");
+            ConsoleUI.printInfo("会话ID: " + sessionId.substring(0, 8) + "（使用 /sessions 查看历史，/resume <id> 恢复）");
 
             // 9. 进入 REPL 主循环
             java.util.concurrent.atomic.AtomicBoolean stockEnabled =
                     new java.util.concurrent.atomic.AtomicBoolean(STOCK_TOOLS_ENABLED);
             runREPL(agent, credentialProvider, chatModel, mcpClient, permissionEngine, workspaceManager, primaryProvider,
                     stockEnabled, secureFileWorkspace, executionManager, workspaceDir, limits,
-                    contextManager, replyBudgetMiddleware);
+                    contextManager, replyBudgetMiddleware, sessionLoggingMiddleware);
 
         } catch (Exception e) {
             log.error("应用启动失败", e);
@@ -576,7 +588,8 @@ public class AgentScopeDemoApplication {
                                 Path workspaceDir,
                                 AgentLimits limits,
                                 ContextManager contextManager,
-                                ReplyBudgetControlMiddleware replyBudgetMiddleware) {
+                                ReplyBudgetControlMiddleware replyBudgetMiddleware,
+                                SessionLoggingMiddleware sessionLoggingMiddleware) {
         AgentTeam team = null;
         boolean showEvents = false;
 
@@ -609,6 +622,103 @@ public class AgentScopeDemoApplication {
             if ("history".equalsIgnoreCase(trimmed)) {
                 // 查看对话历史
                 ConsoleUI.printHistory(agent.getContext());
+                continue;
+            }
+
+            if ("sessions".equalsIgnoreCase(trimmed) || "/sessions".equalsIgnoreCase(trimmed)) {
+                // 列出所有已保存的会话
+                SessionRecovery recovery = new SessionRecovery(workspaceDir);
+                List<SessionSummary> sessions = recovery.listSessions();
+                if (sessions.isEmpty()) {
+                    ConsoleUI.printInfo("暂无已保存的会话");
+                } else {
+                    System.out.println();
+                    System.out.println("\u001B[1m  📜 已保存的会话 (" + sessions.size() + ")\u001B[0m");
+                    ConsoleUI.printSeparator();
+                    for (SessionSummary s : sessions) {
+                        String shortId = s.sessionId().length() >= 8
+                                ? s.sessionId().substring(0, 8) : s.sessionId();
+                        String time = s.lastActivity() != null ? s.lastActivity() : "?";
+                        String preview = s.preview() != null && !s.preview().isEmpty()
+                                ? s.preview() : "(无预览)";
+                        System.out.println("  \u001B[36m" + shortId + "\u001B[0m  "
+                                + "\u001B[2m" + time + "\u001B[0m  "
+                                + "msg=" + s.userMessageCount() + "  "
+                                + "\u001B[3m" + preview + "\u001B[0m");
+                    }
+                    ConsoleUI.printSeparator();
+                    ConsoleUI.printInfo("使用 /resume <短ID> 恢复指定会话");
+                }
+                continue;
+            }
+
+            if (trimmed.toLowerCase().startsWith("/resume")
+                    || trimmed.toLowerCase().startsWith("resume")) {
+                String[] parts = trimmed.split("\\s+", 2);
+                if (parts.length < 2 || parts[1].isBlank()) {
+                    ConsoleUI.printError("用法: /resume <会话ID或短ID>");
+                    continue;
+                }
+                String idPrefix = parts[1].trim();
+
+                SessionRecovery recovery = new SessionRecovery(workspaceDir);
+                // 短 ID 前缀匹配
+                List<SessionSummary> all = recovery.listSessions();
+                String matchedId = null;
+                for (SessionSummary s : all) {
+                    if (s.sessionId().startsWith(idPrefix)) {
+                        if (matchedId != null) {
+                            ConsoleUI.printError("短 ID '" + idPrefix + "' 匹配多个会话，请用更长前缀");
+                            matchedId = null;
+                            break;
+                        }
+                        matchedId = s.sessionId();
+                    }
+                }
+                if (matchedId == null) {
+                    // 尝试作为完整 ID 加载
+                    matchedId = idPrefix;
+                }
+
+                try {
+                    RecoveredSession recovered = recovery.load(matchedId);
+                    // 重置智能体并恢复上下文
+                    agent.reset();
+                    agent.restoreContext(recovered.messages());
+
+                    // 关闭旧 SessionLogger，新建一个续写到同一文件
+                    SessionLogger oldLogger = sessionLoggingMiddleware.getSessionLogger();
+                    String newSessionId = recovered.sessionId();
+                    SessionLogger newLogger = new SessionLogger(
+                            workspaceDir, newSessionId, recovered.lastEntryUuid());
+
+                    // 替换中间件链中的 SessionLoggingMiddleware
+                    MiddlewareChain chain = agent.getMiddlewareChain();
+                    chain.remove(sessionLoggingMiddleware);
+                    SessionLoggingMiddleware newMiddleware = new SessionLoggingMiddleware(newLogger);
+                    chain.add(newMiddleware);
+                    // 更新局部引用，使后续 reply() 走新中间件
+                    sessionLoggingMiddleware = newMiddleware;
+
+                    try { oldLogger.close(); } catch (Exception ignored) {}
+
+                    // 用户反馈
+                    ConsoleUI.printSuccess("会话已恢复: " + newSessionId.substring(0, 8));
+                    ConsoleUI.printInfo("恢复消息数: " + recovered.messages().size()
+                            + "，entry 数: " + recovered.totalEntries());
+                    if (recovered.firstTimestamp() != null) {
+                        ConsoleUI.printInfo("会话时间: " + recovered.firstTimestamp()
+                                + " → " + recovered.lastTimestamp());
+                    }
+                    if (recovered.hasIncompleteTurn()) {
+                        ConsoleUI.printWarning("⚠ 上一轮对话未正常结束（可能中断），新输入将继续此对话");
+                    }
+                    if (recovered.agentState() != null && !recovered.agentState().isEmpty()) {
+                        ConsoleUI.printInfo("智能体状态快照: " + recovered.agentState());
+                    }
+                } catch (IllegalArgumentException ex) {
+                    ConsoleUI.printError("会话不存在或无法加载: " + ex.getMessage());
+                }
                 continue;
             }
 
