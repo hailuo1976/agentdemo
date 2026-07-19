@@ -32,8 +32,11 @@ public class ChatModel {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final MediaType JSON_MEDIA_TYPE = MediaType.get("application/json; charset=utf-8");
 
-    /** max_tokens 默认值（与 AgentLimits 默认一致）。运行期通过 {@link #setMaxOutputTokens} 覆盖。 */
-    private int maxOutputTokens = 8192;
+    /**
+     * max_tokens 默认值（与 AgentLimits 默认一致）。运行期通过 {@link #setMaxOutputTokens} 覆盖。
+     * 设为 0 表示请求体不传 {@code max_tokens} 字段，由提供商按模型默认上限放行。
+     */
+    private int maxOutputTokens = 16384;
     private static final double DEFAULT_TEMPERATURE = 0.7;
 
     /** LLM HTTP 超时（秒）。默认值与 {@link com.demo.agentscope.config.AgentLimits} 保持一致。 */
@@ -109,7 +112,7 @@ public class ChatModel {
      * </p>
      */
     public void setMaxOutputTokens(int maxOutputTokens) {
-        if (maxOutputTokens > 0) {
+        if (maxOutputTokens >= 0) {
             this.maxOutputTokens = maxOutputTokens;
         }
     }
@@ -444,7 +447,10 @@ public class ChatModel {
                                          List<MCPClient.ToolInfo> tools) {
         ObjectNode body = OBJECT_MAPPER.createObjectNode();
         body.put("model", modelName);
-        body.put("max_tokens", maxOutputTokens);
+        // maxOutputTokens=0 表示不传 max_tokens 字段，由提供商按模型默认上限放行
+        if (maxOutputTokens > 0) {
+            body.put("max_tokens", maxOutputTokens);
+        }
         body.put("temperature", DEFAULT_TEMPERATURE);
 
         // 构建消息数组

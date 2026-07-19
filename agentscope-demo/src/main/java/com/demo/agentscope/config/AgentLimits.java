@@ -26,8 +26,13 @@ public class AgentLimits {
     /** 单次回复的 token 预算上限。 */
     private int replyBudgetTokens = 500_000;
 
-    /** 单次 LLM 调用的输出 token 上限（max_tokens 参数）。 */
-    private int maxOutputTokens = 8192;
+    /**
+     * 单次 LLM 调用的输出 token 上限（max_tokens 参数）。
+     * <p>
+     * 默认 16384。设为 0 表示请求体不传 {@code max_tokens} 字段，由提供商按模型默认上限放行。
+     * </p>
+     */
+    private int maxOutputTokens = 16384;
 
     /** 迭代预算告警阈值：剩余轮数 ≤ 此值时注入 user 角色预算告警。 */
     private int iterationWarnRemaining = 10;
@@ -146,7 +151,7 @@ public class AgentLimits {
         switch (key) {
             case "maxIterations" -> maxIterations = requirePositiveInt(key, value);
             case "replyBudgetTokens" -> replyBudgetTokens = requirePositiveInt(key, value);
-            case "maxOutputTokens" -> maxOutputTokens = requirePositiveInt(key, value);
+            case "maxOutputTokens" -> maxOutputTokens = requireNonNegativeInt(key, value);
             case "iterationWarnRemaining" -> iterationWarnRemaining = requireNonNegativeInt(key, value);
             case "tokenBudgetWarnPercent" -> {
                 int pct = requireNonNegativeInt(key, value);
