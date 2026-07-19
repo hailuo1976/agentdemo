@@ -130,6 +130,15 @@ public class AgentScopeDemoApplication {
                 - 原始完整内容已归档，需要查看时调用 `get_full_tool_output` 工具，参数为 `tool_call_id`。
                 - 仅在确实需要完整细节（精确定位行号、核查数据、二次分析）时才取回全量，避免不必要的上下文膨胀。
                 """);
+        sb.append("""
+
+                ## 信息呈现与用户交互工具
+                - `render_markdown`：当需要向用户展示结构化内容（标题、表格、列表、代码块、任务清单）时调用；它会直接把渲染结果打印到用户终端。
+                  调用后**不要**再用纯文本重复同一内容，只补充关键说明即可。
+                - `ask_user`：当用户意图不明确、需要补充细节、从候选选项中选择、或需要用户确认关键操作时调用。
+                  支持四种模式：choice（单选）/multi（多选）/fill（填空）/confirm（确认）。
+                  返回结构化 JSON（status、value、indices 等），据此调整后续动作；用户取消时 status=cancelled，应礼貌终止或给出默认方案。
+                """);
         if (stockEnabled) {
             sb.append(STOCK_PROMPT_ADDENDUM);
         }
@@ -243,6 +252,18 @@ public class AgentScopeDemoApplication {
                                 : "[未找到 tool_call_id=" + toolCallId + " 对应的归档输出。可用的 ID："
                                         + available.keySet() + "]";
                     });
+
+            // 4.3.2 Markdown 渲染工具 + 交互式澄清工具
+            mcpClient.registerCustomTool(
+                    com.demo.agentscope.ui.markdown.MarkdownToolExecutor.TOOL_NAME,
+                    com.demo.agentscope.ui.markdown.MarkdownToolExecutor.TOOL_DESCRIPTION,
+                    com.demo.agentscope.ui.markdown.MarkdownToolExecutor.parametersJson(),
+                    new com.demo.agentscope.ui.markdown.MarkdownToolExecutor());
+            mcpClient.registerCustomTool(
+                    com.demo.agentscope.ui.interaction.UserInteractionToolExecutor.TOOL_NAME,
+                    com.demo.agentscope.ui.interaction.UserInteractionToolExecutor.TOOL_DESCRIPTION,
+                    com.demo.agentscope.ui.interaction.UserInteractionToolExecutor.parametersJson(),
+                    new com.demo.agentscope.ui.interaction.UserInteractionToolExecutor());
 
             // 4.4 股票分析工具（受 STOCK_TOOLS_ENABLED 开关控制，默认关闭）
             TuShareDataSource tuShareSource = STOCK_TOOLS_ENABLED ? new TuShareDataSource(executionManager) : null;
@@ -539,6 +560,14 @@ public class AgentScopeDemoApplication {
         engine.addRule(new PermissionRule("list_artifacts", PermissionDecision.ALLOW, "列出可见 artifact"));
         engine.addRule(new PermissionRule("get_artifact", PermissionDecision.ALLOW, "接收 artifact（含 sha256 校验）"));
         engine.addRule(new PermissionRule("mark_artifact_read", PermissionDecision.ALLOW, "标记 artifact 已读"));
+
+        // 允许 UI 工具（纯本地渲染 / 交互；参数仅为展示内容或提示文本，不触发任何路径或命令操作）
+        engine.addRule(new PermissionRule(
+                com.demo.agentscope.ui.markdown.MarkdownToolExecutor.TOOL_NAME,
+                PermissionDecision.ALLOW, "Markdown 渲染：仅向 stdout 打印，无副作用"));
+        engine.addRule(new PermissionRule(
+                com.demo.agentscope.ui.interaction.UserInteractionToolExecutor.TOOL_NAME,
+                PermissionDecision.ALLOW, "用户交互：同步读取 stdin，无副作用"));
 
         // 允许股票工具（受 STOCK_TOOLS_ENABLED 控制）
         if (stockEnabled) {

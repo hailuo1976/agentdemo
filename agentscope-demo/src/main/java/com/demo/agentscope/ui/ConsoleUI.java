@@ -47,14 +47,16 @@ public class ConsoleUI {
      * </p>
      */
     private static final LineReader STDIN_READER;
+    private static final Terminal STDIN_TERMINAL;
     private static final BufferedReader FALLBACK_READER;
     private static final boolean JLINE_AVAILABLE;
 
     static {
+        Terminal terminal = null;
         LineReader reader = null;
         boolean jlineOk = false;
         try {
-            Terminal terminal = TerminalBuilder.builder().system(true).build();
+            terminal = TerminalBuilder.builder().system(true).build();
             reader = LineReaderBuilder.builder().terminal(terminal).build();
             // 预触发 BellType 类加载 —— JLine 3.25.1 的 beep() 方法在运行期
             // 第一次触发时才加载 BellType enum，shade 后偶发 NoClassDefFoundError。
@@ -71,22 +73,23 @@ public class ConsoleUI {
             System.err.println("[ConsoleUI] JLine3 初始化失败，回退到 BufferedReader: " + e.getMessage());
         }
         STDIN_READER = reader;
+        STDIN_TERMINAL = terminal;
         FALLBACK_READER = new BufferedReader(
                 new InputStreamReader(System.in, StandardCharsets.UTF_8));
         JLINE_AVAILABLE = jlineOk;
     }
 
-    // ==================== ANSI 颜色常量 ====================
+    // ==================== ANSI 颜色常量（委托至 AnsiColors） ====================
 
-    private static final String RESET = "\u001B[0m";
-    private static final String GREEN = "\u001B[32m";
-    private static final String BLUE = "\u001B[34m";
-    private static final String YELLOW = "\u001B[33m";
-    private static final String RED = "\u001B[31m";
-    private static final String CYAN = "\u001B[36m";
-    private static final String MAGENTA = "\u001B[35m";
-    private static final String BOLD = "\u001B[1m";
-    private static final String DIM = "\u001B[2m";
+    private static final String RESET = AnsiColors.RESET;
+    private static final String GREEN = AnsiColors.GREEN;
+    private static final String BLUE = AnsiColors.BLUE;
+    private static final String YELLOW = AnsiColors.YELLOW;
+    private static final String RED = AnsiColors.RED;
+    private static final String CYAN = AnsiColors.CYAN;
+    private static final String MAGENTA = AnsiColors.MAGENTA;
+    private static final String BOLD = AnsiColors.BOLD;
+    private static final String DIM = AnsiColors.DIM;
 
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
 
@@ -157,6 +160,77 @@ public class ConsoleUI {
             System.err.println("[ConsoleUI] BufferedReader 读取失败: " + e.getMessage());
             return null;
         }
+    }
+
+    // ==================== 公共输入与终端辅助（供工具复用） ====================
+
+    /**
+     * 带提示符读取一行用户输入，复用 REPL 的 JLine3 + UTF-8 回退路径。
+     * <p>
+     * 与 {@link #promptUser()} 相比：本方法允许传入任意提示符，供交互式工具
+     * （如 {@code ask_user}）在 tool 执行期间同步阻塞读取用户输入。
+     * </p>
+     * <p>
+     * 行为约定：
+     * <ul>
+     *   <li>读取成功 → 返回 trim 后的字符串（可能为空串）</li>
+     *   <li>EOF（Ctrl+D）或 Ctrl+C → 返回 {@code null}，由调用方决定如何处理</li>
+     *   <li>JLine 运行期异常 → 本次回退到 BufferedReader，仍失败则返回 {@code null}</li>
+     * </ul>
+     * </p>
+     *
+     * @param prompt 展示给用户的提示符（不含结尾空格；方法内不自动补）
+     * @return 用户输入的一行；EOF 或读取失败时返回 {@code null}
+     */
+    public static String readLine(String prompt) {
+        if (JLINE_AVAILABLE && STDIN_READER != null) {
+            try {
+                String raw = STDIN_READER.readLine(prompt);
+                return raw == null ? null : raw.trim();
+            } catch (UserInterruptException e) {
+                return null;
+            } catch (EndOfFileException e) {
+                return null;
+            } catch (Throwable e) {
+                System.err.println("[ConsoleUI] JLine readLine 异常，本次回退到 BufferedReader: "
+                        + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+        }
+        System.out.print(prompt);
+        System.out.flush();
+        try {
+            String line = FALLBACK_READER.readLine();
+            return line == null ? null : line.trim();
+        } catch (IOException e) {
+            System.err.println("[ConsoleUI] BufferedReader 读取失败: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 返回当前终端的列宽，用于 Markdown 渲染、表格排版等。
+     * <p>
+     * 通过 JLine 的 {@link Terminal#getWidth()} 获取；若 JLine 不可用或返回非正值，
+     * 回退到环境变量 {@code COLUMNS}，再不行就用 80。
+     * </p>
+     *
+     * @return 终端列宽，始终为正整数
+     */
+    public static int getTerminalWidth() {
+        if (STDIN_TERMINAL != null) {
+            int w = STDIN_TERMINAL.getWidth();
+            if (w > 0) return w;
+        }
+        String cols = System.getenv("COLUMNS");
+        if (cols != null && !cols.isBlank()) {
+            try {
+                int w = Integer.parseInt(cols.trim());
+                if (w > 0) return w;
+            } catch (NumberFormatException ignored) {
+                // 落到默认值
+            }
+        }
+        return 80;
     }
 
     // ==================== 智能体响应 ====================
