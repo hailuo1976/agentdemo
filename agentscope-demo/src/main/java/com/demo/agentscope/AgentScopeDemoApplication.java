@@ -33,6 +33,9 @@ import com.demo.agentscope.session.SessionLoggingMiddleware;
 import com.demo.agentscope.session.SessionRecovery;
 import com.demo.agentscope.session.SessionRecovery.RecoveredSession;
 import com.demo.agentscope.session.SessionRecovery.SessionSummary;
+import com.demo.agentscope.skill.SkillConstants;
+import com.demo.agentscope.skill.SkillManager;
+import com.demo.agentscope.skill.SkillToolService;
 import com.demo.agentscope.ui.ConsoleUI;
 import com.demo.agentscope.ui.VerbosityLevel;
 import com.demo.agentscope.stock.StockToolService;
@@ -138,6 +141,18 @@ public class AgentScopeDemoApplication {
                 - `ask_user`：当用户意图不明确、需要补充细节、从候选选项中选择、或需要用户确认关键操作时调用。
                   支持四种模式：choice（单选）/multi（多选）/fill（填空）/confirm（确认）。
                   返回结构化 JSON（status、value、indices 等），据此调整后续动作；用户取消时 status=cancelled，应礼貌终止或给出默认方案。
+                """);
+        sb.append("""
+
+                ## 技能管理工具（skill_*）
+                系统提供 12 个 skill_* 工具，用于把一次性解决问题的经验沉淀为可检索、可复用的「技能条目」，跨会话保留。
+                - 何时主动沉淀：完成一类典型任务后（尤其涉及多步骤、易错点、行业诀窍），调用 `skill_create` 记录；字段包括 name、description、tags、steps、cases、successCases、resources。
+                - 何时先检索：面对新问题时，先用 `skill_search` 按 query 关键词查相关技能；找到合适的就遵循其 steps，避免重复造轮子。
+                - 列表/读取：`skill_list` 列摘要（支持 tag/status 过滤），`skill_get` 按 ID 读全文（同时自增 useCount）。
+                - 生命周期：`skill_publish`（DRAFT→PUBLISHED，加分搜索权重）、`skill_deprecate`（弃用）、`skill_update`（version 自增，旧版归档到 versions/）、`skill_delete`（软删除，需 confirm=true）、`skill_history`（查版本链）。
+                - 导入导出：`skill_export target_dir=...` 把技能写为 Markdown（含 YAML frontmatter），`skill_import source_dir=...` 反向扫描 .md 文件导入。便于 git 版本管理与跨机迁移。
+                - 统计：`skill_stats period=7d|30d|all` 渲染使用统计（总览+每日访问柱状图+Top 技能）到终端，辅助判断哪些技能最有价值。
+                - 工作目录：`workspace/skills/`（index.json + manifests/ + versions/ + access.log）。
                 """);
         if (stockEnabled) {
             sb.append(STOCK_PROMPT_ADDENDUM);
@@ -264,6 +279,13 @@ public class AgentScopeDemoApplication {
                     com.demo.agentscope.ui.interaction.UserInteractionToolExecutor.TOOL_DESCRIPTION,
                     com.demo.agentscope.ui.interaction.UserInteractionToolExecutor.parametersJson(),
                     new com.demo.agentscope.ui.interaction.UserInteractionToolExecutor());
+
+            // 4.5 技能管理工具（核心沉淀能力，默认启用）
+            Path skillsDir = workspaceDir.resolve("skills");
+            SkillManager skillManager = new SkillManager(skillsDir);
+            SkillToolService skillToolService = new SkillToolService(skillManager, workspaceDir);
+            skillToolService.registerTools(mcpClient);
+            log.info("技能管理工具已启用 ({} 个工具)", SkillConstants.TOOL_NAMES.size());
 
             // 4.4 股票分析工具（受 STOCK_TOOLS_ENABLED 开关控制，默认关闭）
             TuShareDataSource tuShareSource = STOCK_TOOLS_ENABLED ? new TuShareDataSource(executionManager) : null;
@@ -568,6 +590,11 @@ public class AgentScopeDemoApplication {
         engine.addRule(new PermissionRule(
                 com.demo.agentscope.ui.interaction.UserInteractionToolExecutor.TOOL_NAME,
                 PermissionDecision.ALLOW, "用户交互：同步读取 stdin，无副作用"));
+
+        // 允许技能管理工具（默认启用，核心沉淀能力）
+        for (String tool : SkillConstants.TOOL_NAMES) {
+            engine.addRule(new PermissionRule(tool, PermissionDecision.ALLOW, "技能管理工具"));
+        }
 
         // 允许股票工具（受 STOCK_TOOLS_ENABLED 控制）
         if (stockEnabled) {
