@@ -1,6 +1,5 @@
 package com.demo.agentscope.ui;
 
-import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
 /**
@@ -28,6 +27,9 @@ public class AgentProgressTracker {
 
     /** 思考流是否已经开始（用于控制 DIM 样式只在首尾输出一次） */
     private boolean thinkingStreamStarted;
+
+    /** 工具输出流式回显是否已开头（用于在首行打引导、末行打收尾分隔） */
+    private boolean streamingActive;
 
     public AgentProgressTracker(String agentName, VerbosityLevel verbosity) {
         this.agentName = agentName;
@@ -153,6 +155,40 @@ public class AgentProgressTracker {
             thinkingStreamStarted = false;
         }
         System.out.println();
+    }
+
+    /**
+     * 工具执行期间逐行输出实时回显。
+     * <p>
+     * 由 {@code CodeExecutionManager.OutputLineCallback} 触发，用于 execute_python 等长任务执行过程中
+     * 把 stdout / stderr 同步打印到终端，避免用户在超时窗口内看不到任何反馈。
+     * 首次调用会先打一个引导行（"工具输出 ↓"），结束后再 {@link #onToolOutputStreamEnd} 收尾。
+     * </p>
+     *
+     * @param toolName 工具名（如 "execute_python"）
+     * @param stream   "stdout" 或 "stderr"
+     * @param line     本行内容（不含换行符）
+     */
+    public void onToolOutputStream(String toolName, String stream, String line) {
+        if (verbosity == VerbosityLevel.MINIMAL) return;
+        if (!streamingActive) {
+            streamingActive = true;
+            System.out.println("\u001B[2m  ── " + toolName + " 输出 ↓ ──\u001B[0m");
+        }
+        String prefix = "stderr".equals(stream)
+                ? "\u001B[33m  │ \u001B[0m"
+                : "\u001B[2m  │ \u001B[0m";
+        System.out.println(prefix + line);
+    }
+
+    /**
+     * 流式输出收尾：打一个分隔线，把后续模型回复和输出分开。
+     */
+    public void onToolOutputStreamEnd() {
+        if (!streamingActive) return;
+        streamingActive = false;
+        System.out.println("\u001B[2m  ──────────────\u001B[0m");
+        System.out.flush();
     }
 
     public int getCurrentIteration() {

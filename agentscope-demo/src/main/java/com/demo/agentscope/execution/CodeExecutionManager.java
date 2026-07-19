@@ -90,6 +90,21 @@ public class CodeExecutionManager {
      * @return 执行结果
      */
     public ExecutionResult executePython(String code) {
+        return executePython(code, null);
+    }
+
+    /**
+     * 执行 Python 代码，并在每行 stdout/stderr 产生时实时回调。
+     * <p>
+     * 用于在终端同步回显长时间运行脚本的输出，避免用户在 30 秒超时窗口内看不到任何反馈。
+     * 回调在独立的读取线程中触发，实现方应避免耗时操作。
+     * </p>
+     *
+     * @param code     Python 代码
+     * @param callback 每行输出回调；为 null 时退化为 {@link #executePython(String)}
+     * @return 执行结果
+     */
+    public ExecutionResult executePython(String code, OutputLineCallback callback) {
         log.info("执行 Python 代码 ({}字符)", code != null ? code.length() : 0);
 
         // 安全检查
@@ -109,7 +124,7 @@ public class CodeExecutionManager {
         }
 
         try {
-            return executeProcess(new String[]{PYTHON_CMD, tempFile.toString()}, "python");
+            return executeProcess(new String[]{PYTHON_CMD, tempFile.toString()}, "python", callback);
         } finally {
             try {
                 Files.deleteIfExists(tempFile);
@@ -167,13 +182,18 @@ public class CodeExecutionManager {
     // ==================== 核心执行逻辑 ====================
 
     /**
-     * 执行外部进程。
+     * 执行外部进程，可选地把 stdout / stderr 逐行实时回调出去。
+     * <p>
+     * 实现使用两个守护线程并发读取 stdout / stderr —— 进程本身可能死锁地往两个流写，
+     * 必须并发消费。回调在读取线程内触发，因此实现方必须轻量、非阻塞。
+     * </p>
      *
-     * @param command 命令及参数
-     * @param label   执行标签（用于日志）
+     * @param command  命令及参数
+     * @param label    执行标签（用于日志）
+     * @param callback 每行输出回调；null 时不回调
      * @return 执行结果
      */
-    private ExecutionResult executeProcess(String[] command, String label) {
+    private ExecutionResult executeProcess(String[] command, String label, OutputLineCallback callback) {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.directory(workingDirectory.toFile());
         pb.redirectErrorStream(false);
@@ -182,22 +202,34 @@ public class CodeExecutionManager {
         try {
             process = pb.start();
 
-            // 读取 stdout 和 stderr
-            String stdout = readStream(process.getInputStream());
-            String stderr = readStream(process.getErrorStream());
+            // 并发读 stdout / stderr —— 必须并发，否则进程写满 pipe 缓冲会死锁
+            StringBuilder stdoutBuf = new StringBuilder();
+            StringBuilder stderrBuf = new StringBuilder();
+            Thread stdoutReader = startStreamThread(process.getInputStream(), "stdout",
+                    stdoutBuf, callback, label);
+            Thread stderrReader = startStreamThread(process.getErrorStream(), "stderr",
+                    stderrBuf, callback, label);
 
             // 等待进程完成，带超时
             boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
+                // 等读线程把已缓冲的数据收尾
+                joinQuietly(stdoutReader);
+                joinQuietly(stderrReader);
                 log.warn("[{}] 执行超时（{}秒），已强制终止", label, timeoutSeconds);
-                return ExecutionResult.timeout(stdout, stderr, timeoutSeconds);
+                return ExecutionResult.timeout(stdoutBuf.toString(), stderrBuf.toString(), timeoutSeconds);
             }
+
+            // 等读线程结束，确保所有输出都进了 buf
+            joinQuietly(stdoutReader);
+            joinQuietly(stderrReader);
 
             int exitCode = process.exitValue();
             log.debug("[{}] 执行完成，exitCode={}", label, exitCode);
 
-            return new ExecutionResult(exitCode, stdout, stderr, false, false, null);
+            return new ExecutionResult(exitCode, stdoutBuf.toString(), stderrBuf.toString(),
+                    false, false, null);
 
         } catch (IOException e) {
             log.error("[{}] 进程启动失败: {}", label, e.getMessage());
@@ -213,33 +245,53 @@ public class CodeExecutionManager {
     }
 
     /**
+     * 启动一个守护线程读取进程输出流，逐行累积到 buf 并（若有）回调。
+     */
+    private Thread startStreamThread(java.io.InputStream is, String streamName,
+                                     StringBuilder buf, OutputLineCallback callback,
+                                     String label) {
+        Thread t = new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(is, StandardCharsets.UTF_8))) {
+                String line;
+                boolean first = true;
+                while ((line = reader.readLine()) != null) {
+                    if (!first) {
+                        buf.append('\n');
+                    }
+                    buf.append(line);
+                    first = false;
+                    if (callback != null) {
+                        try {
+                            callback.onLine(streamName, line);
+                        } catch (Throwable ignored) {
+                            // 回调异常不影响主流程
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                log.debug("[{}] 读取 {} 异常: {}", label, streamName, e.getMessage());
+            }
+        }, "exec-" + label + "-" + streamName);
+        t.setDaemon(true);
+        t.start();
+        return t;
+    }
+
+    private static void joinQuietly(Thread t) {
+        try {
+            t.join(2000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
      * 执行外部进程（可变参数重载）。
      */
     private ExecutionResult executeProcess(String... commandParts) {
         String label = commandParts[0];
-        return executeProcess(commandParts, label);
-    }
-
-    /**
-     * 执行外部进程（指定标签）。
-     */
-    private ExecutionResult executeProcess(String command, String arg, String label) {
-        return executeProcess(new String[]{command, arg}, label);
-    }
-
-    /**
-     * 读取进程输出流。
-     */
-    private String readStream(java.io.InputStream is) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (sb.length() > 0) sb.append("\n");
-                sb.append(line);
-            }
-        }
-        return sb.toString();
+        return executeProcess(commandParts, label, null);
     }
 
     // ==================== 工具方法 ====================
@@ -389,5 +441,22 @@ public class CodeExecutionManager {
             }
             return sb.toString();
         }
+    }
+
+    /**
+     * 逐行输出回调接口。
+     * <p>
+     * {@link #executePython(String, OutputLineCallback)} 和
+     * {@link #executeProcess(String[], String, OutputLineCallback)}
+     * 在每读出一行 stdout / stderr 时触发；实现方应做到非阻塞，避免拖慢进程。
+     * </p>
+     */
+    @FunctionalInterface
+    public interface OutputLineCallback {
+        /**
+         * @param stream "stdout" 或 "stderr"
+         * @param line   本行内容（不含换行符）
+         */
+        void onLine(String stream, String line);
     }
 }

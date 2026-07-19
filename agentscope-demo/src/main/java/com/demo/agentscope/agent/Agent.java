@@ -153,6 +153,7 @@ public class Agent {
 
         // 进度跟踪：每次回复都按当前 verbosity 重建跟踪器，使 REPL 的 verbosity 调整立即生效
         this.progressTracker = new AgentProgressTracker(name, VerbosityLevel.fromEnv());
+        mcpClient.setReplyTracker(progressTracker);
         progressTracker.onReplyStart(userInput);
         long replyStartTime = System.currentTimeMillis();
 
@@ -316,6 +317,7 @@ public class Agent {
         // 进度跟踪：回复完成
         long replyDuration = System.currentTimeMillis() - replyStartTime;
         progressTracker.onReplyComplete(replyDuration);
+        mcpClient.setReplyTracker(null);
 
         // 更新状态
         agentState.put("lastReplyTime", Instant.now().toString());
@@ -362,6 +364,7 @@ public class Agent {
 
         // 进度跟踪：每次回复都按当前 verbosity 重建跟踪器
         this.progressTracker = new AgentProgressTracker(name, VerbosityLevel.fromEnv());
+        mcpClient.setReplyTracker(progressTracker);
         progressTracker.onReplyStart(userInput);
         long replyStartTime = System.currentTimeMillis();
 
@@ -498,6 +501,7 @@ public class Agent {
 
         long replyDuration = System.currentTimeMillis() - replyStartTime;
         progressTracker.onReplyComplete(replyDuration);
+        mcpClient.setReplyTracker(null);
 
         // 更新状态
         agentState.put("lastReplyTime", Instant.now().toString());

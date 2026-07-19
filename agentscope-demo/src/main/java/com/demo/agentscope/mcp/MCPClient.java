@@ -41,6 +41,16 @@ public class MCPClient {
     /** 工具结果摘要器 */
     private final ToolResultSummarizer resultSummarizer;
 
+    /**
+     * 当前 reply 周期的进度跟踪器（由 Agent 在 reply/replyStream 开始时 set）。
+     * <p>
+     * 用于让 execute_python 等长任务工具在执行过程中逐行回显输出到终端。
+     * 多线程可见：Agent 单线程驱动，但执行器内的读流线程是 daemon，
+     * 因此 volatile 保证可见性。
+     * </p>
+     */
+    private volatile com.demo.agentscope.ui.AgentProgressTracker currentReplyTracker;
+
     public MCPClient() {
         this.configs = new ArrayList<>();
         this.connections = new ConcurrentHashMap<>();
@@ -253,8 +263,13 @@ public class MCPClient {
                 {"type":"object","properties":{"code":{"type":"string","description":"要执行的 Python 代码，支持多行"}},"required":["code"]}""";
         registerBuiltin("execute_python", "执行 Python 代码并返回输出结果（stdout + stderr）", pythonParams, (args) -> {
             String code = String.valueOf(args.getOrDefault("code", ""));
-            CodeExecutionManager.ExecutionResult result = executionManager.executePython(code);
-            return result.toString();
+            CodeExecutionManager.OutputLineCallback cb = trackerToCallback();
+            try {
+                CodeExecutionManager.ExecutionResult result = executionManager.executePython(code, cb);
+                return result.toString();
+            } finally {
+                finishStreaming();
+            }
         });
 
         String commandParams = """
@@ -274,6 +289,39 @@ public class MCPClient {
         });
 
         log.info("已注册 3 个代码执行工具（execute_python/execute_command/install_package）");
+    }
+
+    /**
+     * 设置当前 reply 周期的进度跟踪器（用于把 execute_python 的逐行输出转给 tracker）。
+     * <p>
+     * Agent 在每次 reply 开始时调用 setReplyTracker(tracker)，结束时 setReplyTracker(null)。
+     * 非流式 / 单元测试场景不调用，currentReplyTracker 保持 null，行为退化为无回显。
+     * </p>
+     */
+    public void setReplyTracker(com.demo.agentscope.ui.AgentProgressTracker tracker) {
+        this.currentReplyTracker = tracker;
+        if (tracker != null) {
+            log.debug("MCPClient 已绑定当前 reply 的进度跟踪器: {}", tracker.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * 把当前 currentReplyTracker 包装成 OutputLineCallback；null 时返回 null。
+     */
+    private CodeExecutionManager.OutputLineCallback trackerToCallback() {
+        com.demo.agentscope.ui.AgentProgressTracker tracker = currentReplyTracker;
+        if (tracker == null) {
+            return null;
+        }
+        return (stream, line) -> tracker.onToolOutputStream("execute_python", stream, line);
+    }
+
+    /** 工具执行结束时收尾流式输出。 */
+    private void finishStreaming() {
+        com.demo.agentscope.ui.AgentProgressTracker tracker = currentReplyTracker;
+        if (tracker != null) {
+            tracker.onToolOutputStreamEnd();
+        }
     }
 
     /**

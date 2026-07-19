@@ -4,6 +4,8 @@ import org.junit.jupiter.api.*;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -162,5 +164,56 @@ class CodeExecutionManagerTest {
     @DisplayName("超时配置正确")
     void testTimeoutConfig() {
         assertEquals(30, manager.getTimeoutSeconds());
+    }
+
+    // ===== 流式回调测试 =====
+
+    @Test
+    @DisplayName("executePython 带回调时实时推送 stdout 逐行")
+    void testStreamCallbackReceivesLines() {
+        String code = "import time\nfor i in range(3):\n    print(f'line-{i}')\n    time.sleep(0.01)";
+        List<String> stdoutLines = new ArrayList<>();
+        List<String> stderrLines = new ArrayList<>();
+        CodeExecutionManager.OutputLineCallback cb = (stream, line) -> {
+            if ("stdout".equals(stream)) stdoutLines.add(line);
+            else stderrLines.add(line);
+        };
+
+        CodeExecutionManager.ExecutionResult result = manager.executePython(code, cb);
+
+        assertTrue(result.isSuccess(), "执行应成功: " + result);
+        assertEquals(3, stdoutLines.size(), "回调应收到 3 行 stdout");
+        assertEquals("line-0", stdoutLines.get(0));
+        assertEquals("line-1", stdoutLines.get(1));
+        assertEquals("line-2", stdoutLines.get(2));
+        // 最终 result 的 stdout 仍应完整保留
+        assertTrue(result.getStdout().contains("line-0"));
+        assertTrue(result.getStdout().contains("line-2"));
+    }
+
+    @Test
+    @DisplayName("executePython 带回调时 stderr 流也回调")
+    void testStreamCallbackReceivesStderr() {
+        // 主动写一行 stderr
+        String code = "import sys\nsys.stderr.write('warn-here\\n')";
+        List<String> stderrLines = new ArrayList<>();
+        CodeExecutionManager.OutputLineCallback cb = (stream, line) -> {
+            if ("stderr".equals(stream)) stderrLines.add(line);
+        };
+
+        CodeExecutionManager.ExecutionResult result = manager.executePython(code, cb);
+
+        // Python 进程本身退出码 0；我们只验证 stderr 回调
+        assertTrue(stderrLines.stream().anyMatch(l -> l.contains("warn-here")),
+                "stderr 回调应包含 warn-here: " + stderrLines);
+        assertTrue(result.getStderr().contains("warn-here"));
+    }
+
+    @Test
+    @DisplayName("callback 为 null 时退化为非流式（兼容）")
+    void testNullCallbackDegradesGracefully() {
+        CodeExecutionManager.ExecutionResult result = manager.executePython("print('ok')", null);
+        assertTrue(result.isSuccess());
+        assertTrue(result.getStdout().contains("ok"));
     }
 }
