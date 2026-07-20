@@ -81,6 +81,21 @@ public class Msg {
                 List.of(new ContentBlock.TextBlock(text)));
     }
 
+    /**
+     * 工厂方法：构造只含单个文本块的 user 消息。
+     * <p>
+     * 对偶于 {@link #assistantText(String)}，用于 {@code /context trim} 告知、
+     * 错误回退等需要 user 角色消息的场景。
+     * </p>
+     *
+     * @param text 文本内容
+     * @return 新建的 user 消息
+     */
+    public static Msg userText(String text) {
+        return new Msg(UUID.randomUUID().toString(), "user",
+                List.of(new ContentBlock.TextBlock(text)));
+    }
+
     // ==================== Getter ====================
 
     public String getId() {

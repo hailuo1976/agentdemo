@@ -1,6 +1,7 @@
 package com.demo.agentscope.session;
 
 import com.demo.agentscope.message.ContentBlock;
+import com.demo.agentscope.message.ContentBlockCodec;
 import com.demo.agentscope.message.Msg;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -14,7 +15,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -282,60 +282,10 @@ public class SessionLogger {
 
     /**
      * 把 {@link ContentBlock} 列表转换为可序列化的 DTO 列表。
+     * 委托至 {@link ContentBlockCodec#toBlockDtos(List)} 统一实现。
      */
     private List<SessionEntry.BlockDto> toBlockDtos(List<ContentBlock> blocks) {
-        if (blocks == null || blocks.isEmpty()) {
-            return new ArrayList<>();
-        }
-        List<SessionEntry.BlockDto> result = new ArrayList<>(blocks.size());
-        for (ContentBlock block : blocks) {
-            result.add(toBlockDto(block));
-        }
-        return result;
-    }
-
-    /**
-     * 单个 ContentBlock → BlockDto 转换。
-     */
-    private SessionEntry.BlockDto toBlockDto(ContentBlock block) {
-        if (block instanceof ContentBlock.TextBlock t) {
-            return new SessionEntry.BlockDto(
-                    ContentBlock.TextBlock.TYPE, t.getText(),
-                    null, null, null, null, null, null, null);
-        }
-        if (block instanceof ContentBlock.ToolCallBlock tc) {
-            return new SessionEntry.BlockDto(
-                    ContentBlock.ToolCallBlock.TYPE, null,
-                    tc.getId(), tc.getName(), tc.getArguments(),
-                    null, null, null, null);
-        }
-        if (block instanceof ContentBlock.ToolResultBlock tr) {
-            return new SessionEntry.BlockDto(
-                    ContentBlock.ToolResultBlock.TYPE, null,
-                    tr.getToolCallId(), null, null,
-                    tr.getContent(), tr.isError(), null, null);
-        }
-        if (block instanceof ContentBlock.ThinkingBlock tb) {
-            return new SessionEntry.BlockDto(
-                    ContentBlock.ThinkingBlock.TYPE, tb.getText(),
-                    null, null, null, null, null, null, null);
-        }
-        if (block instanceof ContentBlock.HintBlock hb) {
-            return new SessionEntry.BlockDto(
-                    ContentBlock.HintBlock.TYPE, hb.getText(),
-                    null, null, null, null, null, null, null);
-        }
-        if (block instanceof ContentBlock.DataBlock db) {
-            String b64 = db.getData() != null
-                    ? Base64.getEncoder().encodeToString(db.getData()) : null;
-            return new SessionEntry.BlockDto(
-                    ContentBlock.DataBlock.TYPE, null,
-                    null, null, null, null, null, db.getMimeType(), b64);
-        }
-        // 兜底：未识别的块类型，记类型 + toString
-        return new SessionEntry.BlockDto(
-                block.getType(), block.toString(),
-                null, null, null, null, null, null, null);
+        return ContentBlockCodec.toBlockDtos(blocks);
     }
 
     private static String newUuid() {

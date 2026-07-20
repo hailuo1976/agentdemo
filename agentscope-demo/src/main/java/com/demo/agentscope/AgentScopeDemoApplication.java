@@ -16,6 +16,8 @@ import com.demo.agentscope.filepermission.SecureFileWorkspace;
 import com.demo.agentscope.mcp.MCPClient;
 import com.demo.agentscope.mcp.MCPConfig;
 import com.demo.agentscope.memory.LongTermMemory;
+import com.demo.agentscope.memory.MemoryConstants;
+import com.demo.agentscope.memory.MemoryToolService;
 import com.demo.agentscope.memory.ShortTermMemory;
 import com.demo.agentscope.message.Msg;
 import com.demo.agentscope.middleware.ContextCompressionMiddleware;
@@ -37,6 +39,7 @@ import com.demo.agentscope.skill.SkillConstants;
 import com.demo.agentscope.skill.SkillManager;
 import com.demo.agentscope.skill.SkillToolService;
 import com.demo.agentscope.ui.ConsoleUI;
+import com.demo.agentscope.ui.ContextCommandHandler;
 import com.demo.agentscope.ui.VerbosityLevel;
 import com.demo.agentscope.stock.StockToolService;
 import com.demo.agentscope.stock.data.AkShareDataSource;
@@ -153,6 +156,29 @@ public class AgentScopeDemoApplication {
                 - 导入导出：`skill_export target_dir=...` 把技能写为 Markdown（含 YAML frontmatter），`skill_import source_dir=...` 反向扫描 .md 文件导入。便于 git 版本管理与跨机迁移。
                 - 统计：`skill_stats period=7d|30d|all` 渲染使用统计（总览+每日访问柱状图+Top 技能）到终端，辅助判断哪些技能最有价值。
                 - 工作目录：`workspace/skills/`（index.json + manifests/ + versions/ + access.log）。
+                """);
+        sb.append("""
+
+                ## 记忆管理工具（memory_*）
+                系统提供 6 个 memory_* 工具，用于跨会话沉淀用户偏好、领域知识与关键发现。与 skill_*（任务型经验）互补，memory_* 更偏「点状事实」。
+                - 何时主动存：用户明确说「记住这个」、纠正了你之前的错误、发现了重要用户偏好（语言/框架/风格选择）时，调用 `memory_store`。字段：summary（必填）+ key_findings[] + entities[] + task_context + importance(0-1) + scope(short|long)。
+                - 短期 vs 长期：近期会话级细节用 short；长期稳定的用户偏好/领域知识用 long。不确定就先 short，后续用 `memory_promote id=...` 升级。
+                - 检索：新任务开始前先用 `memory_recall query=关键词` 查一次，避免重复问已确认的细节。`memory_list scope=both` 列出全部条目。
+                - 删除：误存或过时信息用 `memory_delete id=... scope=short|long` 删除（需显式指定 scope）。
+                - 不要存：临时计算结果、工具原始返回、敏感信息（密码/token）。
+                - 统计：`memory_stats` 渲染条目数/平均重要性/Top 访问/近 7 天写入柱状图到终端。
+                - 工作目录：`workspace/memory/{short_term,long_term}/`，每个条目一个 JSON 文件。
+                """);
+        sb.append("""
+
+                ## 工作目录写入约定
+                默认根目录 workspace/ 下，请按内容类型选择子目录：
+                - 正式报告 → workspace/reports/{stocks|research|<主题>}/
+                - 分析脚本 → workspace/scripts/
+                - 结构化数据（JSON/CSV） → workspace/data/
+                - 图表/PDF/图片 → workspace/assets/
+                - 临时草稿 → workspace/tmp/（每次启动会清空，重要的东西不要放这里）
+                如果用户未指定路径，按上述约定自行决定；不要把文件直接堆在 workspace/ 根目录。
                 """);
         if (stockEnabled) {
             sb.append(STOCK_PROMPT_ADDENDUM);
@@ -280,12 +306,29 @@ public class AgentScopeDemoApplication {
                     com.demo.agentscope.ui.interaction.UserInteractionToolExecutor.parametersJson(),
                     new com.demo.agentscope.ui.interaction.UserInteractionToolExecutor());
 
+            // 4.4.1 记忆基础设施（先行创建，供 4.6 的 memory_* 工具与 8.x 的 ContextManager 共用）
+            ShortTermMemory shortTermMemory = new ShortTermMemory(
+                    workspaceDir.resolve("memory/short_term"),
+                    1000,  // 最大记忆条目数
+                    Duration.ofDays(7)  // 保留7天
+            );
+            LongTermMemory longTermMemory = new LongTermMemory(
+                    workspaceDir.resolve("memory/long_term"),
+                    5000  // 最大记忆条目数
+            );
+
             // 4.5 技能管理工具（核心沉淀能力，默认启用）
             Path skillsDir = workspaceDir.resolve("skills");
             SkillManager skillManager = new SkillManager(skillsDir);
             SkillToolService skillToolService = new SkillToolService(skillManager, workspaceDir);
             skillToolService.registerTools(mcpClient);
             log.info("技能管理工具已启用 ({} 个工具)", SkillConstants.TOOL_NAMES.size());
+
+            // 4.6 记忆管理工具（跨会话经验沉淀，LLM 主动写入）
+            MemoryToolService memoryToolService = new MemoryToolService(
+                    shortTermMemory, longTermMemory);
+            memoryToolService.registerTools(mcpClient);
+            log.info("记忆管理工具已启用 ({} 个工具)", MemoryConstants.TOOL_NAMES.size());
 
             // 4.4 股票分析工具（受 STOCK_TOOLS_ENABLED 开关控制，默认关闭）
             TuShareDataSource tuShareSource = STOCK_TOOLS_ENABLED ? new TuShareDataSource(executionManager) : null;
@@ -351,18 +394,7 @@ public class AgentScopeDemoApplication {
                             toolOutputArchive, mcpClient.getToolResultSummarizer());
             agent.setToolResultArchiver(toolResultArchiver);
 
-            // 8.1 创建短期记忆管理器
-            ShortTermMemory shortTermMemory = new ShortTermMemory(
-                    workspaceDir.resolve("memory/short_term"),
-                    1000,  // 最大记忆条目数
-                    Duration.ofDays(7)  // 保留7天
-            );
-
-            // 8.2 创建长期记忆管理器
-            LongTermMemory longTermMemory = new LongTermMemory(
-                    workspaceDir.resolve("memory/long_term"),
-                    5000  // 最大记忆条目数
-            );
+            // 8.1 短期/长期记忆管理器（已在 4.4.1 创建，此处复用）
 
             // 8.3 创建智能上下文管理器并集成到智能体
             ContextManager contextManager = new ContextManager(
@@ -594,6 +626,11 @@ public class AgentScopeDemoApplication {
         // 允许技能管理工具（默认启用，核心沉淀能力）
         for (String tool : SkillConstants.TOOL_NAMES) {
             engine.addRule(new PermissionRule(tool, PermissionDecision.ALLOW, "技能管理工具"));
+        }
+
+        // 允许记忆管理工具（LLM 主动写入跨会话经验）
+        for (String tool : MemoryConstants.TOOL_NAMES) {
+            engine.addRule(new PermissionRule(tool, PermissionDecision.ALLOW, "记忆管理工具"));
         }
 
         // 允许股票工具（受 STOCK_TOOLS_ENABLED 控制）
@@ -1028,6 +1065,14 @@ public class AgentScopeDemoApplication {
                     default -> ConsoleUI.printError("无效参数: " + arg + "（用法: /stock on | /stock off）");
                 }
                 continue;
+            }
+
+            // ---- /context 上下文管理 ----
+
+            if (trimmed.toLowerCase().startsWith("/context")) {
+                if (ContextCommandHandler.handle(trimmed, agent, workspaceDir)) {
+                    continue;
+                }
             }
 
             // ---- 智能体对话 ----

@@ -816,6 +816,92 @@ public class Agent {
     }
 
     /**
+     * 替换指定索引的消息（{@code /context edit} 场景）。
+     *
+     * @param index  目标索引（0-based）
+     * @param newMsg 新消息（保留调用方构造的 id/role/timestamp）
+     * @throws IndexOutOfBoundsException 索引越界
+     */
+    public void replaceMessage(int index, Msg newMsg) {
+        if (index < 0 || index >= context.size()) {
+            throw new IndexOutOfBoundsException(
+                    "消息索引越界: " + index + "（当前长度 " + context.size() + "）");
+        }
+        context.set(index, newMsg);
+        log.info("智能体 [{}] 上下文消息 [{}] 已替换", name, index);
+    }
+
+    /**
+     * 删除指定索引的消息，后续消息索引前移（{@code /context delete} 场景）。
+     *
+     * @param index 目标索引（0-based）
+     * @throws IndexOutOfBoundsException 索引越界
+     */
+    public void deleteMessage(int index) {
+        if (index < 0 || index >= context.size()) {
+            throw new IndexOutOfBoundsException(
+                    "消息索引越界: " + index + "（当前长度 " + context.size() + "）");
+        }
+        context.remove(index);
+        log.info("智能体 [{}] 上下文消息 [{}] 已删除，剩余 {}", name, index, context.size());
+    }
+
+    /**
+     * 裁剪上下文，保留最近 {@code keepRecent} 条消息（{@code /context trim} 场景）。
+     * <p>
+     * 优先委托 {@link ContextManager#compressContext(List, int)}，以保证与自动压缩一致的
+     * 协议合法性（tool_call↔tool_result 双向配对、user 角色存在）。若 ContextManager
+     * 未装配（单测场景），走内置 fallback：取尾部 N 条 + 注入 user 告知消息。
+     * </p>
+     *
+     * @param keepRecent 保留的最近消息数
+     */
+    public void trimContext(int keepRecent) {
+        List<Msg> original = new ArrayList<>(context);
+        int originalSize = original.size();
+        int dropped;
+
+        if (contextManager != null) {
+            List<Msg> trimmed = contextManager.compressContext(context, keepRecent);
+            // 只保留非 system 消息（system 由 ContextManager.buildContext 按需动态拼接）
+            List<Msg> survivors = new ArrayList<>();
+            for (Msg m : trimmed) {
+                if (!"system".equals(m.getRole())) {
+                    survivors.add(m);
+                }
+            }
+            dropped = originalSize - survivors.size();
+            context.clear();
+            context.addAll(survivors);
+        } else {
+            // fallback：简单取尾部 N 条，并保证至少一条 user 消息
+            int start = Math.max(0, originalSize - keepRecent);
+            List<Msg> trimmed = new ArrayList<>(original.subList(start, originalSize));
+            boolean hasUser = trimmed.stream().anyMatch(m -> "user".equals(m.getRole()));
+            if (!hasUser && !trimmed.isEmpty()) {
+                for (int i = start - 1; i >= 0; i--) {
+                    if ("user".equals(original.get(i).getRole())) {
+                        trimmed.add(0, original.get(i));
+                        break;
+                    }
+                }
+            }
+            dropped = originalSize - trimmed.size();
+            context.clear();
+            context.addAll(trimmed);
+        }
+
+        // 注入 user 告知消息（与 ContextManager.buildContext 约定一致），让模型感知裁剪
+        if (dropped > 0) {
+            Msg notice = Msg.userText("[上下文已手动裁剪，丢弃 " + dropped
+                    + " 条较早消息；如需具体细节请询问]");
+            context.add(0, notice);
+        }
+
+        log.info("智能体 [{}] 上下文已裁剪，保留 {}，丢弃 {}", name, context.size(), dropped);
+    }
+
+    /**
      * 关闭智能体，释放资源。
      */
     public void shutdown() {

@@ -7,9 +7,11 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 /**
  * 本地工作空间。
@@ -45,9 +47,55 @@ public class LocalWorkspace implements Workspace {
     public void initialize() {
         try {
             Files.createDirectories(baseDir);
+            // 建立分层目录骨架（幂等）—— 引导 LLM/用户按类型把产物放到对应子目录，
+            // 避免 workspace 根目录堆 80+ 散落文件。详见系统提示词「工作目录写入约定」。
+            for (String sub : new String[]{
+                    "reports", "reports/stocks", "reports/research",
+                    "reports/interim", "scripts", "data", "assets", "tmp"
+            }) {
+                Files.createDirectories(baseDir.resolve(sub));
+            }
+            // 启动时清空 tmp/（只清内容，不删目录本身）—— 真正具备「临时」语义
+            cleanTmp();
             log.info("本地工作空间已初始化: baseDir={}", baseDir);
         } catch (IOException e) {
             throw new RuntimeException("工作空间初始化失败: " + baseDir, e);
+        }
+    }
+
+    /** 清空 tmp/ 目录内容（保留目录本身）。失败只 warn，不中断启动。 */
+    private void cleanTmp() {
+        Path tmpDir = baseDir.resolve("tmp");
+        if (!Files.isDirectory(tmpDir)) {
+            return;
+        }
+        try (Stream<Path> paths = Files.list(tmpDir)) {
+            paths.forEach(p -> {
+                try {
+                    deleteRecursively(p);
+                } catch (IOException e) {
+                    log.warn("清空 tmp 失败: {}", p, e);
+                }
+            });
+        } catch (IOException e) {
+            log.warn("遍历 tmp 失败: {}", tmpDir, e);
+        }
+    }
+
+    /** 递归删除文件或目录（JDK 无内置 API，用 Files.walk 倒序删除）。 */
+    private static void deleteRecursively(Path path) throws IOException {
+        if (!Files.exists(path)) {
+            return;
+        }
+        try (Stream<Path> walk = Files.walk(path)) {
+            walk.sorted(Comparator.reverseOrder())
+                    .forEach(p -> {
+                        try {
+                            Files.deleteIfExists(p);
+                        } catch (IOException e) {
+                            // 忽略单条删除失败，让外层决定是否告警
+                        }
+                    });
         }
     }
 

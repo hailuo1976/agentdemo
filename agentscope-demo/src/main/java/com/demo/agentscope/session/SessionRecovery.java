@@ -1,6 +1,7 @@
 package com.demo.agentscope.session;
 
 import com.demo.agentscope.message.ContentBlock;
+import com.demo.agentscope.message.ContentBlockCodec;
 import com.demo.agentscope.message.Msg;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -11,7 +12,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -232,32 +232,10 @@ public class SessionRecovery {
 
     /**
      * BlockDto → ContentBlock 的反序列化，按 type 字段判别。
+     * 委托至 {@link ContentBlockCodec#fromBlockDto(SessionEntry.BlockDto)} 统一实现。
      */
     private ContentBlock fromBlockDto(SessionEntry.BlockDto b) {
-        if (b == null || b.type() == null) return null;
-        return switch (b.type()) {
-            case ContentBlock.TextBlock.TYPE -> new ContentBlock.TextBlock(b.text() != null ? b.text() : "");
-            case ContentBlock.ToolCallBlock.TYPE -> new ContentBlock.ToolCallBlock(
-                    b.toolCallId() != null ? b.toolCallId() : UUID.randomUUID().toString(),
-                    b.toolName() != null ? b.toolName() : "unknown",
-                    b.arguments() != null ? b.arguments() : "{}");
-            case ContentBlock.ToolResultBlock.TYPE -> new ContentBlock.ToolResultBlock(
-                    b.toolCallId() != null ? b.toolCallId() : UUID.randomUUID().toString(),
-                    b.content() != null ? b.content() : "",
-                    b.isError() != null && b.isError());
-            case ContentBlock.ThinkingBlock.TYPE -> new ContentBlock.ThinkingBlock(b.text() != null ? b.text() : "");
-            case ContentBlock.HintBlock.TYPE -> new ContentBlock.HintBlock(b.text() != null ? b.text() : "");
-            case ContentBlock.DataBlock.TYPE -> {
-                String mt = b.mimeType() != null ? b.mimeType() : "application/octet-stream";
-                byte[] data = b.dataBase64() != null
-                        ? Base64.getDecoder().decode(b.dataBase64()) : new byte[0];
-                yield new ContentBlock.DataBlock(mt, data);
-            }
-            default -> {
-                log.warn("未识别的 BlockDto type: {}", b.type());
-                yield null;
-            }
-        };
+        return ContentBlockCodec.fromBlockDto(b);
     }
 
     private static String extractText(List<SessionEntry.BlockDto> content) {

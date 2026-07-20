@@ -5,6 +5,8 @@ import com.demo.agentscope.agent.AgentTeam;
 import com.demo.agentscope.credential.CredentialProvider;
 import com.demo.agentscope.credential.DefaultCredentialProvider;
 import com.demo.agentscope.mcp.MCPClient;
+import com.demo.agentscope.message.ContentBlock;
+import com.demo.agentscope.message.Msg;
 import com.demo.agentscope.middleware.MiddlewareChain;
 import com.demo.agentscope.model.ChatModel;
 import com.demo.agentscope.permission.PermissionEngine;
@@ -13,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -287,5 +290,76 @@ class AgentTest {
                 workspaceManager,
                 "openai"
         );
+    }
+
+    // ==================== /context mutation API 测试 ====================
+
+    @Test
+    @DisplayName("replaceMessage 合法索引替换消息")
+    void replaceMessageValidIndex() {
+        Agent agent = createTestAgent();
+        Msg original = Msg.userText("原始消息");
+        agent.restoreContext(List.of(original));
+
+        Msg replaced = Msg.userText("替换后");
+        agent.replaceMessage(0, replaced);
+
+        assertEquals(1, agent.getContext().size());
+        assertEquals("替换后",
+                ((ContentBlock.TextBlock) agent.getContext().get(0).getContent().get(0)).getText());
+    }
+
+    @Test
+    @DisplayName("replaceMessage 索引越界抛异常")
+    void replaceMessageOutOfBounds() {
+        Agent agent = createTestAgent();
+        assertThrows(IndexOutOfBoundsException.class,
+                () -> agent.replaceMessage(0, Msg.userText("x")));
+    }
+
+    @Test
+    @DisplayName("deleteMessage 合法索引删除并前移")
+    void deleteMessageValidIndex() {
+        Agent agent = createTestAgent();
+        agent.restoreContext(List.of(
+                Msg.userText("a"), Msg.userText("b"), Msg.userText("c")));
+
+        agent.deleteMessage(1);
+
+        assertEquals(2, agent.getContext().size());
+        assertEquals("a", textOf(agent.getContext().get(0)));
+        assertEquals("c", textOf(agent.getContext().get(1)));
+    }
+
+    @Test
+    @DisplayName("deleteMessage 索引越界抛异常")
+    void deleteMessageOutOfBounds() {
+        Agent agent = createTestAgent();
+        assertThrows(IndexOutOfBoundsException.class, () -> agent.deleteMessage(0));
+    }
+
+    @Test
+    @DisplayName("trimContext 无 ContextManager 走 fallback，注入告知消息")
+    void trimContextWithoutContextManager() {
+        Agent agent = createTestAgent();
+        agent.restoreContext(List.of(
+                Msg.userText("m1"), Msg.userText("m2"),
+                Msg.userText("m3"), Msg.userText("m4"),
+                Msg.userText("m5")));
+
+        agent.trimContext(2);
+
+        // 期望结果：[告知消息, m4, m5] 或 [告知消息, 最近 user 钉位, m4, m5]
+        // fallback 会取尾部 2 条 + 可能钉一条 user；m4/m5 都是 user 则无需钉位
+        assertTrue(agent.getContext().size() >= 2);
+        Msg head = agent.getContext().get(0);
+        assertEquals("user", head.getRole());
+        assertTrue(textOf(head).contains("上下文已手动裁剪"));
+    }
+
+    private static String textOf(Msg m) {
+        if (m.getContent() == null || m.getContent().isEmpty()) return "";
+        ContentBlock b = m.getContent().get(0);
+        return b instanceof ContentBlock.TextBlock t ? t.getText() : "";
     }
 }

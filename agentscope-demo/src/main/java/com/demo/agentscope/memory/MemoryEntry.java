@@ -1,6 +1,10 @@
 package com.demo.agentscope.memory;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -45,8 +49,13 @@ public class MemoryEntry {
      * @param content   内容
      * @param importance 重要性
      */
-    public MemoryEntry(String id, MemoryType type, Instant timestamp,
-                       MemoryContent content, double importance) {
+    @JsonCreator
+    public MemoryEntry(
+            @JsonProperty("id") String id,
+            @JsonProperty("type") MemoryType type,
+            @JsonProperty("timestamp") Instant timestamp,
+            @JsonProperty("content") MemoryContent content,
+            @JsonProperty("importance") double importance) {
         this.id = id;
         this.type = type;
         this.timestamp = timestamp;
@@ -57,11 +66,60 @@ public class MemoryEntry {
     }
 
     /**
+     * 静态工厂：便捷构造新记忆条目（自动填 timestamp/accessCount/lastAccessed）。
+     * <p>
+     * 用于 {@link MemoryToolService} 等主动写入场景，避免外部代码直接 new 再手动设置元字段。
+     * </p>
+     *
+     * @param id         记忆ID
+     * @param type       记忆类型
+     * @param content    内容
+     * @param importance 重要性 [0.0, 1.0]
+     * @return 新建的记忆条目
+     */
+    public static MemoryEntry create(String id, MemoryType type,
+                                     MemoryContent content, double importance) {
+        Instant now = Instant.now();
+        MemoryEntry e = new MemoryEntry(id, type, now, content, clampImportance(importance));
+        return e;
+    }
+
+    private static double clampImportance(double v) {
+        if (v < 0.0) return 0.0;
+        if (v > 1.0) return 1.0;
+        return v;
+    }
+
+    /**
      * 记录一次访问。
      */
     public void recordAccess() {
         this.accessCount++;
         this.lastAccessed = Instant.now();
+    }
+
+    public void setAccessCount(int accessCount) {
+        this.accessCount = accessCount;
+    }
+
+    public void setLastAccessed(Instant lastAccessed) {
+        this.lastAccessed = lastAccessed;
+    }
+
+    public void setType(MemoryType type) {
+        this.type = type;
+    }
+
+    public void setTimestamp(Instant timestamp) {
+        this.timestamp = timestamp;
+    }
+
+    public void setContent(MemoryContent content) {
+        this.content = content;
+    }
+
+    public void setId(String id) {
+        this.id = id;
     }
 
     // Getters
@@ -117,12 +175,17 @@ public class MemoryEntry {
         /** 扩展元数据 */
         private final Map<String, Object> metadata;
 
-        public MemoryContent(String summary, List<String> entities, String taskContext,
-                           List<String> keyFindings, Map<String, Object> metadata) {
+        @JsonCreator
+        public MemoryContent(
+                @JsonProperty("summary") String summary,
+                @JsonProperty("entities") List<String> entities,
+                @JsonProperty("taskContext") String taskContext,
+                @JsonProperty("keyFindings") List<String> keyFindings,
+                @JsonProperty("metadata") Map<String, Object> metadata) {
             this.summary = summary;
-            this.entities = entities;
-            this.taskContext = taskContext;
-            this.keyFindings = keyFindings;
+            this.entities = entities != null ? entities : new ArrayList<>();
+            this.taskContext = taskContext != null ? taskContext : "";
+            this.keyFindings = keyFindings != null ? keyFindings : new ArrayList<>();
             this.metadata = metadata;
         }
 

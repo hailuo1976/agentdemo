@@ -272,8 +272,42 @@ public class ContextManager {
      * 单向检查（只丢弃孤儿 tool）不足以应对 assistant 携带多个 tool_call
      * 但窗口只保留了部分结果的情形。
      * </p>
+     * <p>
+     * 此方法直接压缩当前 Agent 上下文，不修改 Agent 的 context 列表。返回的是
+     * 全新列表（含 system 消息），调用方负责把它写回（或用于只读计算）。
+     * </p>
+     *
+     * @param keepRecentOverride 滑动窗口大小；&lt;=0 时回退到 {@link #maxRecentMessages}
+     * @return 压缩后的消息列表（含 system 消息与可能被钉入的 user 消息）
+     */
+    public List<Msg> compressContext(int keepRecentOverride) {
+        // 此方法供 Agent.trimContext / /context trim 显式触发使用。
+        // 为了不破坏现有 buildContext 的隐式调用路径，内部沿用既有的私有
+        // compressContext(List) 算法，通过临时切换窗口大小实现参数化。
+        // 由于此处没有 Agent 的 context 引用，调用方（Agent.trimContext）
+        // 负责把 Agent.context 传入并接收返回值。
+        throw new UnsupportedOperationException("请使用 compressContext(List, int)");
+    }
+
+    /**
+     * 带窗口覆盖的压缩入口。供 Agent.trimContext 委托使用。
+     *
+     * @param context             待压缩的完整消息列表（含 system）
+     * @param keepRecentOverride  滑动窗口大小；&lt;=0 时回退到 {@link #maxRecentMessages}
+     */
+    public List<Msg> compressContext(List<Msg> context, int keepRecentOverride) {
+        int effective = keepRecentOverride > 0 ? keepRecentOverride : maxRecentMessages;
+        return doCompress(context, effective);
+    }
+
+    /**
+     * 兼容旧入口：直接用 {@link #maxRecentMessages} 作为窗口大小。
      */
     private List<Msg> compressContext(List<Msg> context) {
+        return doCompress(context, maxRecentMessages);
+    }
+
+    private List<Msg> doCompress(List<Msg> context, int keepRecent) {
         List<Msg> compressed = new ArrayList<>();
 
         // 保留系统消息
@@ -284,7 +318,7 @@ public class ContextManager {
         }
 
         // 计算窗口起点
-        int recentCount = Math.min(maxRecentMessages, context.size());
+        int recentCount = Math.min(keepRecent, context.size());
         int startIndex = Math.max(0, context.size() - recentCount);
 
         // 钉住最近的 user 消息：GLM/OpenAI 协议要求 messages 序列必须含 user 角色。

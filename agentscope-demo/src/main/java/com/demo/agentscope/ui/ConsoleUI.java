@@ -487,6 +487,185 @@ public class ConsoleUI {
         System.out.println();
     }
 
+    // ==================== 上下文管理 ====================
+
+    /** 消息数超过此阈值时启用分页显示（避免刷屏） */
+    private static final int CONTEXT_PAGINATION_THRESHOLD = 50;
+    /** 分页显示时首屏展示的消息条数 */
+    private static final int CONTEXT_PAGINATION_HEAD = 20;
+
+    /**
+     * 打印上下文消息列表（带索引）。
+     * <p>
+     * 消息数超过 {@link #CONTEXT_PAGINATION_THRESHOLD} 时只显示首
+     * {@link #CONTEXT_PAGINATION_HEAD} 条 + 省略提示。
+     * </p>
+     *
+     * @param messages 当前 Agent 上下文
+     */
+    public static void printContextView(List<Msg> messages) {
+        System.out.println();
+        System.out.println(BOLD + "  📋 上下文 (" + messages.size() + " 条消息)" + RESET);
+        System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
+
+        int limit = messages.size();
+        boolean truncated = false;
+        if (limit > CONTEXT_PAGINATION_THRESHOLD) {
+            limit = CONTEXT_PAGINATION_HEAD;
+            truncated = true;
+        }
+
+        for (int i = 0; i < limit; i++) {
+            Msg msg = messages.get(i);
+            printContextEntry(i, msg);
+        }
+
+        if (truncated) {
+            int omitted = messages.size() - CONTEXT_PAGINATION_HEAD;
+            System.out.println(DIM + "  […] " + omitted + " more"
+                    + "（使用 /context view <i> 查看完整索引，或 /context status 看摘要）" + RESET);
+        }
+
+        System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
+        System.out.println();
+    }
+
+    /**
+     * 打印单条上下文消息的完整详情（所有 block、metadata、usage）。
+     *
+     * @param msg    消息
+     * @param index  在上下文中的索引
+     */
+    public static void printContextDetail(Msg msg, int index) {
+        System.out.println();
+        System.out.println(BOLD + "  📋 上下文消息 [" + index + "]" + RESET);
+        System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
+
+        String icon = roleIcon(msg.getRole());
+        String roleLabel = switch (msg.getRole()) {
+            case "system" -> "SYSTEM";
+            case "user" -> "USER";
+            case "assistant" -> "ASSISTANT";
+            case "tool" -> "TOOL";
+            default -> msg.getRole().toUpperCase();
+        };
+        System.out.println("  " + icon + " " + BOLD + roleLabel + RESET
+                + DIM + "  (" + msg.getId().substring(0, 8) + ")" + RESET);
+        if (msg.getTimestamp() != null) {
+            System.out.println("  " + DIM + "时间: " + msg.getTimestamp() + RESET);
+        }
+
+        System.out.println("  " + DIM + "内容块 (" + msg.getContent().size() + "):" + RESET);
+        for (int i = 0; i < msg.getContent().size(); i++) {
+            ContentBlock b = msg.getContent().get(i);
+            printContextBlock(i, b);
+        }
+
+        if (msg.getUsage() != null
+                && (msg.getUsage().getPromptTokens() > 0
+                || msg.getUsage().getCompletionTokens() > 0)) {
+            System.out.println("  " + DIM + "tokens: prompt=" + msg.getUsage().getPromptTokens()
+                    + ", completion=" + msg.getUsage().getCompletionTokens()
+                    + ", total=" + msg.getUsage().getTotalTokens() + RESET);
+        }
+
+        if (!msg.getMetadata().isEmpty()) {
+            System.out.println("  " + DIM + "metadata: " + msg.getMetadata() + RESET);
+        }
+
+        System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
+        System.out.println();
+    }
+
+    /**
+     * 打印上下文统计摘要。
+     *
+     * @param msgCount              当前消息数
+     * @param estimatedTokens       估算总 token 数
+     * @param systemPromptChars     系统提示词字符数（-1 表示无 system prompt）
+     * @param contextManagerEnabled 是否装配了 ContextManager（false 时 trim 走 fallback）
+     */
+    public static void printContextStatus(int msgCount, int estimatedTokens,
+                                          int systemPromptChars, boolean contextManagerEnabled) {
+        System.out.println();
+        System.out.println(BOLD + "  📊 上下文状态" + RESET);
+        System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
+        System.out.println("  📌 消息数: " + msgCount);
+        System.out.println("  📌 估算 token: " + estimatedTokens);
+        if (systemPromptChars >= 0) {
+            System.out.println("  📌 系统提示词: " + systemPromptChars + " 字符");
+        } else {
+            System.out.println("  📌 系统提示词: " + DIM + "(未设置)" + RESET);
+        }
+        System.out.println("  📌 ContextManager: "
+                + (contextManagerEnabled ? "已装配" : DIM + "未装配（trim 走 fallback）" + RESET));
+        System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
+        System.out.println();
+    }
+
+    private static void printContextEntry(int index, Msg msg) {
+        String icon = roleIcon(msg.getRole());
+        String text = msg.getTextContent();
+        if (text.isEmpty()) {
+            for (ContentBlock block : msg.getContent()) {
+                if (block instanceof ContentBlock.ToolCallBlock tc) {
+                    text = "[工具调用: " + tc.getName() + "]";
+                    break;
+                } else if (block instanceof ContentBlock.ToolResultBlock tr) {
+                    text = "[工具结果" + (tr.isError() ? "(错误)" : "") + "]";
+                    break;
+                }
+            }
+        }
+        String display = text.length() > 80 ? text.substring(0, 80) + "..." : text;
+        String time = msg.getTimestamp() != null
+                ? msg.getTimestamp().toString().substring(11, 19) : "--:--:--";
+        System.out.println("  " + DIM + "[" + index + "]" + RESET
+                + " " + icon + " " + DIM + time + RESET + " " + display);
+    }
+
+    private static void printContextBlock(int index, ContentBlock block) {
+        if (block instanceof ContentBlock.TextBlock t) {
+            System.out.println("    " + DIM + "[" + index + "] text:" + RESET + " " + t.getText());
+        } else if (block instanceof ContentBlock.ThinkingBlock t) {
+            System.out.println("    " + DIM + "[" + index + "] thinking:" + RESET + " " + t.getText());
+        } else if (block instanceof ContentBlock.HintBlock h) {
+            System.out.println("    " + DIM + "[" + index + "] hint:" + RESET + " " + h.getText());
+        } else if (block instanceof ContentBlock.ToolCallBlock tc) {
+            System.out.println("    " + CYAN + DIM + "[" + index + "] tool_call:" + RESET
+                    + " " + tc.getName() + " (id=" + tc.getId().substring(0, 8) + ")");
+            if (tc.getArguments() != null && !tc.getArguments().isEmpty()) {
+                System.out.println("        " + CYAN + "args: " + tc.getArguments() + RESET);
+            }
+        } else if (block instanceof ContentBlock.ToolResultBlock tr) {
+            String label = tr.isError() ? "tool_error" : "tool_result";
+            String color = tr.isError() ? YELLOW : CYAN;
+            String content = tr.getContent();
+            if (content != null && content.length() > 120) {
+                content = content.substring(0, 120) + "...";
+            }
+            System.out.println("    " + color + DIM + "[" + index + "] " + label + ":" + RESET
+                    + " (callId=" + tr.getToolCallId().substring(0, 8) + ") " + content);
+        } else if (block instanceof ContentBlock.DataBlock db) {
+            System.out.println("    " + DIM + "[" + index + "] data:" + RESET
+                    + " mimeType=" + db.getMimeType() + ", size=" + db.getData().length);
+        } else {
+            System.out.println("    " + DIM + "[" + index + "] " + block.getType() + ":" + RESET
+                    + " " + block);
+        }
+    }
+
+    private static String roleIcon(String role) {
+        if (role == null) return "  ";
+        return switch (role) {
+            case "system" -> YELLOW + "⚙️" + RESET;
+            case "user" -> BLUE + "👤" + RESET;
+            case "assistant" -> GREEN + "🤖" + RESET;
+            case "tool" -> CYAN + "🔧" + RESET;
+            default -> "  ";
+        };
+    }
+
     // ==================== 智能体状态 ====================
 
     /**
@@ -551,6 +730,17 @@ public class ConsoleUI {
         System.out.println("  " + CYAN + "verbosity" + RESET + "  - 调整界面信息详细程度");
         System.out.println("  " + CYAN + "/stock on|off" + RESET + " - 开启/关闭股票分析工具");
         System.out.println("  " + CYAN + "/config" + RESET + "      - 查看/设置运行时限制（/config set maxIterations=30）");
+        System.out.println(DIM + "  ── 上下文管理 ──" + RESET);
+        System.out.println("  " + CYAN + "/context" + RESET + "              - 查看上下文消息（带索引）");
+        System.out.println("  " + CYAN + "/context view <i>" + RESET + "     - 查看指定索引的消息详情");
+        System.out.println("  " + CYAN + "/context edit <i> <text>" + RESET + " - 编辑消息文本（支持 \\n）");
+        System.out.println("  " + CYAN + "/context delete <i>" + RESET + "   - 删除消息（后续索引前移）");
+        System.out.println("  " + CYAN + "/context save <name>" + RESET + "  - 保存到 workspace/conversations/<name>.json");
+        System.out.println("  " + CYAN + "/context load <name>" + RESET + "  - 加载并替换当前上下文");
+        System.out.println("  " + CYAN + "/context trim [keep=N]" + RESET + " - 保留最近 N 条（默认 10）");
+        System.out.println("  " + CYAN + "/context status" + RESET + "       - 上下文统计（消息数、估算 token）");
+        System.out.println("  " + CYAN + "/context system [short]" + RESET + " - 查看系统提示词（short 只看前 500 字符）");
+        System.out.println("  " + CYAN + "/context undo" + RESET + "         - 撤销最近一次 edit/delete/trim/load");
         System.out.println("  " + CYAN + "help" + RESET + "       - 显示此帮助信息");
         System.out.println(DIM + "  ──────────────────────────────────────────────────" + RESET);
         System.out.println();

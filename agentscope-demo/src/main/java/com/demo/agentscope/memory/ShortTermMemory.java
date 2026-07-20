@@ -122,6 +122,32 @@ public class ShortTermMemory {
     }
 
     /**
+     * 按 ID 获取记忆条目（不走访问计数）。
+     *
+     * @param id 记忆ID
+     * @return 记忆条目；若不存在返回 null
+     */
+    public MemoryEntry getById(String id) {
+        return memoryCache.get(id);
+    }
+
+    /**
+     * 按 ID 删除记忆条目（缓存 + 文件）。
+     *
+     * @param id 记忆ID
+     * @return true 表示删除成功；false 表示 ID 不存在
+     */
+    public boolean delete(String id) {
+        MemoryEntry removed = memoryCache.remove(id);
+        if (removed == null) {
+            return false;
+        }
+        deleteMemoryFile(id);
+        log.debug("删除短期记忆: id={}", id);
+        return true;
+    }
+
+    /**
      * 清理过期记忆。
      */
     public void cleanup() {
